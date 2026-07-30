@@ -1,0 +1,40 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+solc = "0.8.28"
+
+# Optimizer on with a modest run count. Not cosmetic: the reference records that
+# CoFHE's mock stack only fits under EIP-170 with the optimizer enabled at
+# runs=200 and *overflows* again at runs=1,000,000. Contract size is sensitive to
+# this setting, so it is pinned rather than left to the profile default.
+optimizer = true
+optimizer_runs = 200
+
+# Monad has no blob transactions (type 3) and follows Ethereum's opcode set
+# otherwise; Cancun is the correct target. Do not raise this without checking
+# which precompiles and opcodes Monad actually implements.
+evm_version = "cancun"
+
+# Deterministic gas snapshots -- see `make gas` and the CI uniformity check.
+gas_reports = ["Vault"]
+
+# Tests etch circomlib's generated Poseidon runtime bytecode, which is produced by
+# `circuits/scripts/gen_poseidon.mjs` -- it is raw EVM assembly, not Solidity, so it
+# cannot be compiled here.
+fs_permissions = [{ access = "read", path = "../circuits/build" }]
+
+[profile.default.fuzz]
+runs = 512
+
+[profile.ci.fuzz]
+runs = 5000
+
+[rpc_endpoints]
+monad_testnet = "https://testnet-rpc.monad.xyz"
+monad_mainnet = "https://rpc.monad.xyz"
+
+[etherscan]
+# Monad testnet verification via Sourcify/monadexplorer -- filled in when we
+# actually deploy.

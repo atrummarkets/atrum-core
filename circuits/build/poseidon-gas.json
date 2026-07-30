@@ -1,0 +1,21 @@
+{
+  "network": "mainnet",
+  "results": {
+    "poseidon2": {
+      "inputs": 2,
+      "gas": 28980,
+      "bytecode_bytes": 9743
+    },
+    "poseidon3": {
+      "inputs": 3,
+      "gas": 45085,
+      "bytecode_bytes": 12463
+    },
+    "_derived": {
+      "poseidon2_gas": 28980,
+      "depth20_insert_gas": 750300,
+      "depth20_insert_plus_verify": 1779754,
+      "fits_2m_envelope": true
+    }
+  }
+}
