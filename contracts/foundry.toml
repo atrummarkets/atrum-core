@@ -25,6 +25,13 @@ gas_reports = ["Vault"]
 # cannot be compiled here.
 fs_permissions = [{ access = "read", path = "../circuits/build" }]
 
+# Generated Groth16 verifiers are snarkjs output, not source. `forge fmt --check` in CI
+# runs after `make verifiers` regenerates them, and snarkjs's own spacing does not satisfy
+# it -- so without this the formatting gate fails on every run, on code nobody wrote and
+# nobody should hand-edit.
+[fmt]
+ignore = ["src/verifiers/*.sol"]
+
 [profile.default.fuzz]
 runs = 512
 
