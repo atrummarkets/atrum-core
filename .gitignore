@@ -1,0 +1,47 @@
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/lib/
+contracts/broadcast/
+
+# Same, if forge is ever run from the repo root by mistake
+/out/
+/cache/
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+
+# Circuit artefacts -- all regenerable via `make circuits`
+circuits/build/*_js/
+circuits/build/*.r1cs
+circuits/build/*.sym
+circuits/build/*.wasm
+circuits/build/*.zkey
+circuits/build/*_verifier.sol
+circuits/build/*_proof.json
+circuits/build/*_calldata.json
+
+# Powers-of-tau: 9.5 MB, downloaded on demand by scripts/build.sh
+circuits/build/*.ptau
+
+# SECRETS. committee-key.json holds an ElGamal decryption secret. The Phase 0 key
+# is a throwaway test key, but never let this pattern become a habit -- in Phase 2
+# the equivalent file can decrypt the entire pool.
+circuits/build/committee-key.json
+.env
+.env.local
+*.pem
+*.key
+
+# Generated verifiers are derived from the zkeys, not source of truth
+contracts/src/verifiers/*.sol
+
+# Measurement output
+circuits/build/gate-*.json
+
+# OS
+.DS_Store
