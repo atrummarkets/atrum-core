@@ -16,12 +16,18 @@ Groth16 proof.
 | Phase | Scope | Status |
 |---|---|---|
 | **0** — kill the risk | Vault skeleton, ElGamal circuit, real gas measurement | **complete, gate passed** |
-| **1** — market, public pools | Vault, ShieldedPool, 3 circuits, parimutuel, sequencer, CI | **complete** |
+| **1** — market, public pools | Vault, ShieldedPool, 3 circuits, parimutuel, sequencer, CI | **complete, 1 critical fixed** |
 | **2** — encrypted pools | Accumulator, `Enc(m)` in-circuit, publisher | not started |
 | **3** — product | Frontend, resolver, seeded markets, threshold committee | not started |
 
-**94 tests passing** — 81 Solidity under the Monad gas schedule, 13 sequencer.
+**115 tests passing** — 102 Solidity under the Monad gas schedule, 13 sequencer.
 Everything numeric below is reproducible with the commands in §6.
+
+**A security review of Phase 1 found and fixed one critical vulnerability**: the
+sequencer could author spendable notes via `queuePadding` and drain the entire vault.
+It was demonstrated with a real Groth16 proof before being fixed, and the proof is
+kept as a regression test. See MEASUREMENTS.md §1d. Assume more exist — that was one
+internal pass, not an audit.
 
 The headline: **a real shielded bet costs 1,165,715 gas end to end, 58% of the
 envelope.** Deposit is 1,378,641 and redeem 1,137,382. The cryptography was never the
@@ -70,6 +76,8 @@ against live Monad nodes rather than taken on trust.
 | **Production circuit padding** | "+15% to 25% over the verifier core" | **−0.2%** | Returns the whole safety margin. Real headroom vs the 1.5M gate is 32%, not ~10%. Verify cost is nearly all precompile cost, and snarkjs emits tight assembly, so there is nothing to pad. |
 | **`modexp` 256-bit inverse** | 4,712 | **4,048** | Ours is exactly `16 × 253`, EIP-7883's formula; the zero-length probe returned exactly 500, EIP-7883's raised minimum. Not blocking — `modexp` is only for field inversion and the design forbids inversion in the hot path. |
 | **Indexed nullifier tree** | recommended, to keep state root-only | **mapping is 24x cheaper — 28,945 vs 690,733** | **661,788 gas saved per bet.** An indexed tree only earns its cost if non-membership must be proved in-circuit; double-spend prevention needs plain membership. **Recommendation: mapping for nullifiers, Merkle tree only for commitments.** Tradeoff accepted: unbounded state growth. |
+| **"A broken sequencer can't steal funds, only halt the market"** | build plan §8 trust model | **false as built — now true** | `queuePadding` let the sequencer author spendable notes and drain the whole vault. Proved with a real Groth16 proof (0 deposited → 5,000 USDC out). **Fixed:** padding is now derived on-chain from `keccak256(PAD_DOMAIN, treeStart, slot)`, so nobody chooses it. Regression test kept. See MEASUREMENTS.md §1d. |
+| **"Fillers are unspendable by construction"** | `ShieldedPool.queuePadding` comment | **false** | `deposit.circom` binds commitment↔amount for deposits, but nothing forced every leaf to come from a deposit, and `redeem.circom` never checks provenance. |
 | **"Prediction markets have thin liquidity and low adoption"** | §11 demand risk | **stale** | Polymarket did $8.9–10.5B/month in 2026, 1.29M wallets in Q1, ICE invested up to $2B at ~$9B valuation. Category demand is proven. The risk moved (see §5). |
 
 ### 2.3 Not verified — do not rely on these
@@ -203,8 +211,9 @@ These are **blocking for mainnet** and none are budgeted in the 8-week plan:
 | **Trusted setup** | Single phase-2 contribution from one dev machine — **that randomness can forge proofs** | Multi-party ceremony |
 | **ptau provenance** | Hermez file used, transcript unverified by us | Verify the transcript |
 | **Committee key** | Test key with a known secret in `circuits/build/` (gitignored) | Real key from a real ceremony |
+| **Verifier field checks** | Safety depends on snarkjs's generated `checkField`, not on our code | Never replace a generated verifier without re-running `FieldBoundary.t.sol` — without that check, `nullifierHash + r` is an unlimited double-spend |
 | **Private redemption** | `Vault.redeem` is **public** | Must move inside the ShieldedPool. A public payout path retroactively deanonymises every position — this makes the privacy claim *false*, not weak. **The one item the plan says never to cut.** |
-| **Audit** | none | External review of circuits + contracts |
+| **Audit** | one internal review done — found 1 critical (fixed) | External review of circuits + contracts. An internal pass found a full-vault drain; assume more exist |
 | **Regulatory position** | undecided | Private markets on real-world outcomes draw scrutiny everywhere; privacy sharpens it |
 
 ### 4.3 Honest summary of distance
@@ -284,6 +293,9 @@ cd sequencer && npm install && npx vitest run   # 13 tests
 
 Order matters on a clean checkout: the contract suite replays real proofs, so
 circuits and fixtures must be built before `make test`.
+
+`make checkup-part PART=vault` runs one area at a time (`vault`, `tree`,
+`shieldedPool`, `parimutuel`, `security`). It needs no RPC and spends nothing.
 
 `make gate` / `make measure` hit live Monad nodes via `eth_call` with state overrides
 — no key, no deploy, no spend. `NETWORK=mainnet` targets chain 143.

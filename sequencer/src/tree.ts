@@ -12,9 +12,44 @@
  * that three implementations of the same rules happen to agree.
  */
 import { buildPoseidon } from "circomlibjs";
+import { keccak_256 } from "@noble/hashes/sha3.js";
 
 export const FIELD_SIZE =
   21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+
+/** keccak256("atrum.shielded.padding.v1") -- the contract's PAD_DOMAIN. */
+const PAD_DOMAIN = keccak_256(new TextEncoder().encode("atrum.shielded.padding.v1"));
+
+/**
+ * The padding leaf the CONTRACT derives for `slot` of the batch grafted at `treeStart`.
+ * Must match `ShieldedPool._derivedFiller` byte for byte.
+ *
+ * Padding is derived on-chain rather than supplied by the sequencer because a
+ * sequencer-chosen filler is a SPENDABLE note: `redeem.circom` proves Merkle membership
+ * and never provenance, so a filler whose secrets the sequencer knew could be redeemed
+ * 1:1 against collateral it never deposited. That was a full vault drain -- see
+ * `contracts/test/PaddingExploit.t.sol`.
+ */
+export function derivedFiller(treeStart: bigint, slot: bigint): bigint {
+  const word = (v: bigint): Uint8Array => {
+    const out = new Uint8Array(32);
+    let x = v;
+    for (let i = 31; i >= 0; i--) {
+      out[i] = Number(x & 0xffn);
+      x >>= 8n;
+    }
+    return out;
+  };
+
+  const preimage = new Uint8Array(96);
+  preimage.set(PAD_DOMAIN, 0);
+  preimage.set(word(treeStart), 32);
+  preimage.set(word(slot), 64);
+
+  const digest = keccak_256(preimage);
+  const hex = Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+  return BigInt("0x" + hex) % FIELD_SIZE;
+}
 
 export const DEPTH = 20;
 export const BATCH_SIZE = 64;

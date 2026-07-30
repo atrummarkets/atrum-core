@@ -10,6 +10,7 @@
     "start": "node --experimental-strip-types src/main.ts"
   },
   "dependencies": {
+    "@noble/hashes": "^2.2.0",
     "circomlibjs": "^0.1.7",
     "viem": "^2.21.0"
   },

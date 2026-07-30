@@ -29,6 +29,14 @@ build: ## Compile contracts with Monad Foundry
 test: ## Run the contract test suite under the Monad gas schedule
 	cd contracts && $(FORGE) test --network monad
 
+.PHONY: checkup
+checkup: ## READABLE WALKTHROUGH: every function, ok/FAIL per call, real proofs
+	cd contracts && $(FORGE) test --network monad --match-test test_checkup_everything -vv
+
+.PHONY: checkup-part
+checkup-part: ## One area: PART=vault|tree|shieldedPool|parimutuel|security
+	cd contracts && $(FORGE) test --network monad --match-test test_checkup_$(PART) -vv
+
 .PHONY: gas
 gas: ## Contract gas report
 	cd contracts && $(FORGE) test --network monad --gas-report

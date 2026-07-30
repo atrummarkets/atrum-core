@@ -88,6 +88,13 @@ contract ShieldedPool {
     /// @notice Batches must be a power of two and aligned to their own size.
     uint256 public constant BATCH_SIZE = 64;
 
+    /// @notice BN254 scalar field, for reducing derived fillers into range.
+    uint256 internal constant FIELD_SIZE =
+        21888242871839275222246405745257275088548364400416034343698204186575808495617;
+
+    /// @notice Domain tag for derived padding leaves.
+    bytes32 internal constant PAD_DOMAIN = keccak256("atrum.shielded.padding.v1");
+
     // -----------------------------------------------------------------------
     // Wiring
     // -----------------------------------------------------------------------
@@ -345,51 +352,83 @@ contract ShieldedPool {
     // Sequencer
     // -----------------------------------------------------------------------
 
-    /// @notice Graft the next `BATCH_SIZE` queued commitments into the tree.
+    /// @notice Graft the next queued commitments into the tree, padding the remainder of
+    ///         the subtree with derived fillers.
     ///
-    /// @dev The sequencer supplies the leaves as calldata and this checks them against
-    ///      the stored queue, rather than reading storage into memory and trusting it --
-    ///      calldata is far cheaper than 64 SLOADs, and the comparison is what stops a
-    ///      malicious sequencer grafting leaves nobody queued.
+    /// @dev The sequencer supplies the real leaves as calldata and this checks them
+    ///      against the stored queue, rather than reading storage into memory and
+    ///      trusting it -- calldata is far cheaper than 64 SLOADs, and the comparison is
+    ///      what stops a malicious sequencer grafting leaves nobody queued.
     ///
-    ///      Fixed batch size is deliberate. The batch IS the anonymity set, so a fixed
-    ///      size means a fixed anonymity set rather than one that leaks how busy the
-    ///      market currently is. Partial batches wait; they are not grafted early.
+    ///      PADDING IS DERIVED ON-CHAIN, NEVER SUPPLIED
+    ///
+    ///      An earlier design exposed `queuePadding(uint256[])`, letting the sequencer
+    ///      push arbitrary field elements onto the same queue `deposit` writes to. Its
+    ///      comment asserted fillers were "unspendable by construction", on the grounds
+    ///      that only `deposit` binds a commitment to paid collateral.
+    ///
+    ///      That was false, and it was exploitable for the entire vault. `deposit.circom`
+    ///      binds commitment to amount *for deposits*, but nothing forced every leaf to
+    ///      have come from a deposit -- and `redeem.circom` proves only Merkle
+    ///      membership, the nullifier hash and injective packing. It never checks
+    ///      provenance. So a "filler" whose secrets the sequencer knew was a fully
+    ///      spendable note, and with `outcome = 0` it took the unbet-refund branch of
+    ///      `_owedUnits`, which pays 1:1 without consulting the pool. See
+    ///      `test/PaddingExploit.t.sol`, which is kept as a regression test.
+    ///
+    ///      Fillers are therefore derived here from a domain-separated hash of the
+    ///      batch's tree position. Nobody chooses them, so nobody knows a note preimage
+    ///      for one, and the sequencer is back to being trusted for liveness only.
+    ///
+    ///      This costs nothing in privacy. The old justification for sequencer-chosen
+    ///      random fillers was that padding must be indistinguishable from real
+    ///      commitments -- but in Phase 1 every real action is a public `deposit` or
+    ///      `bet` transaction, so an observer already knows exactly which leaves are
+    ///      real. Padding never contributed to the anonymity set; it only ever solved
+    ///      liveness, which derived fillers solve equally well.
     function flushBatch(uint256[] calldata leaves) external onlySequencer {
-        if (leaves.length != BATCH_SIZE) revert NotEnoughQueued();
-
         uint256 start = insertedCount;
-        if (start + BATCH_SIZE > pendingCommitments.length) revert NotEnoughQueued();
+        uint256 available = pendingCommitments.length - start;
+        if (available == 0) revert NotEnoughQueued();
 
-        for (uint256 i = 0; i < BATCH_SIZE; i++) {
+        uint256 real = available >= BATCH_SIZE ? BATCH_SIZE : available;
+        if (leaves.length != real) revert NotEnoughQueued();
+
+        uint256[] memory batch = new uint256[](BATCH_SIZE);
+
+        for (uint256 i = 0; i < real; i++) {
             if (leaves[i] != pendingCommitments[start + i]) revert InvalidProof();
+            batch[i] = leaves[i];
         }
 
-        insertedCount = start + BATCH_SIZE;
-        tree.insertSubtree(leaves);
+        // Tree position is unique per batch, so it is a sufficient nonce -- two batches
+        // can never derive the same filler.
+        uint256 treeStart = tree.nextIndex();
+        for (uint256 i = real; i < BATCH_SIZE; i++) {
+            batch[i] = _derivedFiller(treeStart, i);
+        }
 
-        emit BatchInserted(start, BATCH_SIZE, tree.root());
+        // Only the real commitments consume the queue; the fillers occupy tree leaves
+        // but were never queued by anyone.
+        insertedCount = start + real;
+        tree.insertSubtree(batch);
+
+        emit BatchInserted(treeStart, real, tree.root());
     }
 
-    /// @notice Queue sequencer-supplied filler commitments so a partial batch can graft.
-    ///
-    /// @dev Without this the queue deadlocks: `flushBatch` needs exactly BATCH_SIZE
-    ///      leaves, so the last 63 users of a quiet market would wait indefinitely for a
-    ///      64th to appear.
-    ///
-    ///      Fillers MUST be drawn from the same distribution as real commitments -- the
-    ///      sequencer generates notes with random secrets and simply never spends them.
-    ///      A recognisable constant would be worse than useless: it would mark exactly
-    ///      which slots in each batch are real, shrinking the anonymity set to the
-    ///      number of genuine actions instead of BATCH_SIZE.
-    ///
-    ///      Fillers are unspendable by construction -- no one, including the sequencer,
-    ///      can produce a bet proof for a note that was never funded through `deposit`,
-    ///      because the deposit circuit is what binds a commitment to paid collateral.
-    function queuePadding(uint256[] calldata fillers) external onlySequencer {
-        for (uint256 i = 0; i < fillers.length; i++) {
-            _queue(fillers[i]);
-        }
+    /// @notice The filler leaf for slot `slot` of the batch grafted at `treeStart`.
+    /// @dev Exposed so the sequencer's tree mirror derives the same values rather than
+    ///      reimplementing the rule and drifting from it.
+    function derivedFiller(uint256 treeStart, uint256 slot) external pure returns (uint256) {
+        return _derivedFiller(treeStart, slot);
+    }
+
+    /// @dev keccak, not Poseidon: a filler only has to be a field element that nobody
+    ///      knows a note preimage for. It is never hashed in-circuit, so it does not need
+    ///      to be ZK-friendly, and Poseidon would cost 28,980 gas per filler against
+    ///      roughly 100 here.
+    function _derivedFiller(uint256 treeStart, uint256 slot) internal pure returns (uint256) {
+        return uint256(keccak256(abi.encodePacked(PAD_DOMAIN, treeStart, slot))) % FIELD_SIZE;
     }
 
     // -----------------------------------------------------------------------

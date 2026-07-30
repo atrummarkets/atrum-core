@@ -14,6 +14,34 @@
  * Shared by `gen_action_fixtures.mjs` and the sequencer's tree mirror.
  */
 import { buildPoseidon } from "circomlibjs";
+import sha3 from "js-sha3";
+const { keccak256 } = sha3;
+
+/**
+ * The padding leaf the CONTRACT derives for slot `slot` of the batch grafted at tree
+ * position `treeStart`. Must match `ShieldedPool._derivedFiller` exactly.
+ *
+ * Padding is derived rather than sequencer-supplied because a sequencer-chosen filler is
+ * a spendable note: `redeem.circom` proves Merkle membership, never provenance, so a
+ * "filler" whose secrets the sequencer knew could be redeemed 1:1 for collateral it never
+ * deposited. See `contracts/test/PaddingExploit.t.sol`.
+ *
+ * keccak rather than Poseidon: a filler is never hashed in-circuit, so it does not need
+ * to be ZK-friendly, and Poseidon would cost 28,980 gas per filler on-chain.
+ */
+export function derivedFiller(treeStart, slot) {
+  const be = (v) => BigInt(v).toString(16).padStart(64, "0");
+  const preimage = PAD_DOMAIN_HEX + be(treeStart) + be(slot);
+  const bytes = Uint8Array.from(
+    preimage.match(/../g).map((b) => parseInt(b, 16)),
+  );
+  return BigInt("0x" + keccak256(bytes)) % FIELD_SIZE;
+}
+
+/** keccak256("atrum.shielded.padding.v1"), the contract's PAD_DOMAIN. */
+export const PAD_DOMAIN_HEX = keccak256(
+  Uint8Array.from(Buffer.from("atrum.shielded.padding.v1", "utf8")),
+);
 
 export const FIELD_SIZE =
   21888242871839275222246405745257275088548364400416034343698204186575808495617n;

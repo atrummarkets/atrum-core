@@ -152,44 +152,15 @@ contract ShieldedPoolTest is Test {
 
     /// @dev Queue the fixture's filler leaves, then graft the batch.
     ///
-    ///      Each fixture batch is [real commitment, ...63 fillers]. The real one is
-    ///      already queued by the user action; the fillers are what the sequencer would
-    ///      supply to complete a partial batch, so they must be queued through
-    ///      `queuePadding` before `flushBatch` will accept them. Using the fixture's own
-    ///      filler values matters -- the JS mirror hashed exactly these leaves to
-    ///      produce the root the proofs were built against.
-    function _flush(string memory key) internal {
-        uint256[] memory leaves = _batch(key);
-        uint256 needed = pool.insertedCount() + leaves.length;
-        uint256 have = pool.queuedCount();
-
-        if (needed > have) {
-            uint256 count = needed - have;
-            uint256[] memory fillers = new uint256[](count);
-            for (uint256 i = 0; i < count; i++) {
-                fillers[i] = leaves[leaves.length - count + i];
-            }
-            vm.prank(sequencer);
-            pool.queuePadding(fillers);
-        }
-
+    ///      Only the REAL commitments are submitted. The contract derives the rest of the
+    ///      subtree itself, so there is nothing for the sequencer to supply and nothing it
+    ///      can choose. The fixture's own filler values must equal the derived ones or the
+    ///      grafted root will not match the root the proofs were built against -- asserted
+    ///      in `test_derivedFillerMatchesJsMirror`.
+    function _flush(string memory realKey) internal {
+        uint256[] memory real = _batch(realKey);
         vm.prank(sequencer);
-        pool.flushBatch(leaves);
-    }
-
-    function _padTo(uint256 target) internal {
-        uint256 have = pool.queuedCount();
-        if (have >= target) return;
-
-        uint256[] memory fillers = new uint256[](target - have);
-        for (uint256 i = 0; i < fillers.length; i++) {
-            // Stand-in for the sequencer's real fillers, which are unspendable notes
-            // drawn from the same distribution as genuine commitments.
-            fillers[i] = uint256(keccak256(abi.encode("filler", target, i)))
-                % 21888242871839275222246405745257275088548364400416034343698204186575808495617;
-        }
-        vm.prank(sequencer);
-        pool.queuePadding(fillers);
+        pool.flushBatch(real);
     }
 
     function test_deposit_pullsCollateralAndQueuesCommitment() public {
@@ -207,7 +178,7 @@ contract ShieldedPoolTest is Test {
     ///         must equal the root the prover built its Merkle path against.
     function test_contractRootMatchesProverRoot() public {
         _doDeposit();
-        _flush(".batch1");
+        _flush(".batch1Real");
 
         assertEq(
             tree.root(),
@@ -218,7 +189,7 @@ contract ShieldedPoolTest is Test {
 
     function test_bet_spendsNoteAndMovesOdds() public {
         _doDeposit();
-        _flush(".batch1");
+        _flush(".batch1Real");
 
         pool.bet(
             _pA("bet"),
@@ -233,14 +204,18 @@ contract ShieldedPoolTest is Test {
         assertTrue(nullifiers.isSpent(_u(".bet.nullifierHash")), "nullifier not burned");
         assertEq(parimutuel.totalUnits(MARKET_ID), UNITS, "stake not recorded");
         assertEq(parimutuel.yesProbabilityBps(MARKET_ID), 10_000, "one-sided pool should read 100%");
-        // 1 deposit + 63 fillers grafted as batch 1, then the position commitment.
-        assertEq(pool.queuedCount(), 65, "position commitment not queued");
-        assertEq(pool.pendingCommitments(64), _u(".bet.newCommitment"), "queued commitment is not the new position");
+        // Only REAL commitments occupy the queue now -- the deposit and the bet's
+        // replacement note. Padding is derived inside `flushBatch` and never queued, so
+        // the queue length is a true count of user actions rather than actions plus filler.
+        assertEq(pool.queuedCount(), 2, "position commitment not queued");
+        assertEq(pool.insertedCount(), 1, "only the deposit should be grafted so far");
+        // Slot 1, not 64: padding no longer occupies queue slots.
+        assertEq(pool.pendingCommitments(1), _u(".bet.newCommitment"), "queued commitment is not the new position");
     }
 
     function test_bet_rejectsReplay() public {
         _doDeposit();
-        _flush(".batch1");
+        _flush(".batch1Real");
 
         pool.bet(
             _pA("bet"),
@@ -270,7 +245,7 @@ contract ShieldedPoolTest is Test {
     ///      invent a tree containing a note they never paid for and spend it.
     function test_bet_rejectsProofAgainstUnknownRoot() public {
         _doDeposit();
-        _flush(".batch1");
+        _flush(".batch1Real");
 
         vm.expectRevert(ShieldedPool.UnknownRoot.selector);
         pool.bet(
@@ -286,7 +261,7 @@ contract ShieldedPoolTest is Test {
 
     function test_bet_rejectsTamperedPublicSignal() public {
         _doDeposit();
-        _flush(".batch1");
+        _flush(".batch1Real");
 
         vm.expectRevert(ShieldedPool.InvalidProof.selector);
         pool.bet(
@@ -302,7 +277,7 @@ contract ShieldedPoolTest is Test {
 
     function test_fullLifecycle_depositBetResolveRedeem() public {
         _doDeposit();
-        _flush(".batch1");
+        _flush(".batch1Real");
 
         pool.bet(
             _pA("bet"),
@@ -314,7 +289,7 @@ contract ShieldedPoolTest is Test {
             _u(".bet.betData")
         );
 
-        _flush(".batch2");
+        _flush(".batch2Real");
         assertEq(tree.root(), _u(".rootAfterBatch2"), "root diverged after second batch");
 
         vm.warp(resolutionStart + 1);
@@ -340,7 +315,7 @@ contract ShieldedPoolTest is Test {
 
     function test_redeem_revertsBeforeResolution() public {
         _doDeposit();
-        _flush(".batch1");
+        _flush(".batch1Real");
         pool.bet(
             _pA("bet"),
             _pB("bet"),
@@ -350,7 +325,7 @@ contract ShieldedPoolTest is Test {
             _u(".bet.newCommitment"),
             _u(".bet.betData")
         );
-        _flush(".batch2");
+        _flush(".batch2Real");
 
         vm.expectRevert(ShieldedPool.NotResolved.selector);
         pool.redeem(
@@ -366,7 +341,7 @@ contract ShieldedPoolTest is Test {
 
     function test_redeem_revertsForLosingSide() public {
         _doDeposit();
-        _flush(".batch1");
+        _flush(".batch1Real");
         pool.bet(
             _pA("bet"),
             _pB("bet"),
@@ -376,7 +351,7 @@ contract ShieldedPoolTest is Test {
             _u(".bet.newCommitment"),
             _u(".bet.betData")
         );
-        _flush(".batch2");
+        _flush(".batch2Real");
 
         vm.warp(resolutionStart + 1);
         vm.prank(resolver);
@@ -400,10 +375,9 @@ contract ShieldedPoolTest is Test {
 
     function test_flushBatch_onlySequencer() public {
         _doDeposit();
-        _padTo(64);
 
         vm.expectRevert(ShieldedPool.NotSequencer.selector);
-        pool.flushBatch(_batch(".batch1"));
+        pool.flushBatch(_batch(".batch1Real"));
     }
 
     /// @notice The sequencer cannot graft leaves nobody queued.
@@ -411,25 +385,52 @@ contract ShieldedPoolTest is Test {
     ///      of its own and hand itself spendable notes.
     function test_flushBatch_rejectsLeavesNobodyQueued() public {
         _doDeposit();
-        _padTo(64);
 
-        uint256[] memory forged = _batch(".batch1");
-        forged[10] = 12345;
+        uint256[] memory forged = new uint256[](1);
+        forged[0] = 12345;
 
         vm.prank(sequencer);
         vm.expectRevert(ShieldedPool.InvalidProof.selector);
         pool.flushBatch(forged);
     }
 
-    function test_flushBatch_rejectsPartialBatch() public {
+    /// @notice A partial batch grafts, padded by the contract. This is the liveness
+    ///         property the removed `queuePadding` used to provide -- without it the last
+    ///         63 users of a quiet market would wait forever for a 64th.
+    function test_flushBatch_graftsPartialBatchWithDerivedPadding() public {
         _doDeposit();
 
         uint256[] memory short = new uint256[](1);
         short[0] = _u(".deposit.commitment");
 
         vm.prank(sequencer);
-        vm.expectRevert(ShieldedPool.NotEnoughQueued.selector);
         pool.flushBatch(short);
+
+        assertEq(pool.insertedCount(), 1, "only the real commitment is consumed");
+        assertEq(tree.nextIndex(), 64, "a full aligned subtree must still be grafted");
+    }
+
+    /// @notice Submitting more leaves than are actually queued is rejected.
+    function test_flushBatch_rejectsMoreLeavesThanQueued() public {
+        _doDeposit();
+
+        uint256[] memory tooMany = new uint256[](2);
+        tooMany[0] = _u(".deposit.commitment");
+        tooMany[1] = 999;
+
+        vm.prank(sequencer);
+        vm.expectRevert(ShieldedPool.NotEnoughQueued.selector);
+        pool.flushBatch(tooMany);
+    }
+
+    /// @notice Nothing queued means nothing to flush.
+    function test_flushBatch_rejectsEmptyQueue() public {
+        uint256[] memory one = new uint256[](1);
+        one[0] = 1;
+
+        vm.prank(sequencer);
+        vm.expectRevert(ShieldedPool.NotEnoughQueued.selector);
+        pool.flushBatch(one);
     }
 
     // -----------------------------------------------------------------------
@@ -438,7 +439,7 @@ contract ShieldedPoolTest is Test {
 
     function test_gate_realBetFitsActionEnvelope() public {
         _doDeposit();
-        _flush(".batch1");
+        _flush(".batch1Real");
 
         // Hoist every fixture read OUT of the measured region. `_pA`/`_u` run
         // `vm.parseJson` cheatcodes, which cost ~1M gas of harness overhead -- inside
@@ -476,7 +477,7 @@ contract ShieldedPoolTest is Test {
         pool.deposit(dpA, dpB, dpC, dCommitment, MARKET_ID, UNITS);
         uint256 depositGas = before - gasleft();
 
-        _flush(".batch1");
+        _flush(".batch1Real");
         pool.bet(
             _pA("bet"),
             _pB("bet"),
@@ -486,7 +487,7 @@ contract ShieldedPoolTest is Test {
             _u(".bet.newCommitment"),
             _u(".bet.betData")
         );
-        _flush(".batch2");
+        _flush(".batch2Real");
 
         vm.warp(resolutionStart + 1);
         vm.prank(resolver);
@@ -516,12 +517,10 @@ contract ShieldedPoolTest is Test {
     ///         30,000,000 transaction limit, not the action envelope.
     function test_flushBatch_fitsTransactionLimit() public {
         _doDeposit();
-        _padTo(64);
 
-        uint256[] memory leaves = new uint256[](64);
-        for (uint256 i = 0; i < 64; i++) {
-            leaves[i] = pool.pendingCommitments(i);
-        }
+        // Worst case for the contract: one real leaf, so it derives all 63 fillers.
+        uint256[] memory leaves = new uint256[](1);
+        leaves[0] = pool.pendingCommitments(0);
 
         vm.prank(sequencer);
         uint256 before = gasleft();

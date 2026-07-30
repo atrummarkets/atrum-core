@@ -68,16 +68,11 @@ contract Exercise is Script {
         pool.deposit(_pA("deposit"), _pB("deposit"), _pC("deposit"), _u(".deposit.commitment"), MARKET_ID, UNITS);
         console.log("deposit done, queued:", pool.queuedCount());
 
-        // The sequencer's filler. On a live chain these would be random unspendable
-        // notes; here they are the fixture's own fillers so the grafted root matches the
-        // root the bet proof was built against.
-        uint256[] memory fillers = new uint256[](batch1.length - 1);
-        for (uint256 i = 0; i < fillers.length; i++) {
-            fillers[i] = batch1[i + 1];
-        }
-        pool.queuePadding(fillers);
-
-        pool.flushBatch(batch1);
+        // Only the real commitment is submitted; the contract derives the remaining 63
+        // filler leaves itself, so the sequencer cannot choose one.
+        uint256[] memory real = new uint256[](1);
+        real[0] = batch1[0];
+        pool.flushBatch(real);
         console.log("batch grafted, queued:", pool.queuedCount());
 
         pool.bet(

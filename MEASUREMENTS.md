@@ -348,6 +348,136 @@ stayed sealed.
 
 ---
 
+## 1d. Security review — one critical vulnerability, found and fixed
+
+An independent review of the Phase 1 branch. Circuits, contracts, nullifier sets and
+the sequencer were read line by line, and every gas claim was re-measured rather than
+taken from the commit message. **All action gas figures reproduced exactly.** One
+critical vulnerability was found.
+
+### [CRITICAL, FIXED] `queuePadding` let the sequencer drain the entire vault
+
+`ShieldedPool` exposed `queuePadding(uint256[])`, letting the sequencer push arbitrary
+field elements onto the same commitment queue `deposit` writes to. Its comment
+asserted:
+
+> "Fillers are unspendable by construction -- no one, including the sequencer, can
+> produce a bet proof for a note that was never funded through `deposit`, because the
+> deposit circuit is what binds a commitment to paid collateral."
+
+**That was false.** `deposit.circom` binds commitment to amount *for deposits*, but
+nothing forced every leaf in the tree to have originated from a deposit — and
+`redeem.circom` proves only Merkle membership, the nullifier hash, and injective
+packing. It never checks provenance.
+
+So a filler whose secrets the sequencer knew was a fully spendable note. With
+`outcome = 0` it took the unbet-refund branch of `_owedUnits`, which pays `units` 1:1
+without consulting the parimutuel pool at all.
+
+**Demonstrated, not argued.** `circuits/scripts/gen_padding_exploit.mjs` produced a
+real Groth16 redeem proof for a note that was never deposited, verified by snarkjs, and
+replayed through the real verifier:
+
+| | |
+|---|---|
+| Collateral deposited by honest users | 5,000,000,000 |
+| Collateral deposited by attacker | **0** |
+| Attacker received | **5,000,000,000** |
+| Pool complete sets remaining | 0 |
+
+Theft was bounded by what the pool held (`Vault.redeem` reverts otherwise), so it was
+not unlimited minting — it was appropriation of other depositors' collateral, up to the
+whole vault. Honest depositors were then unpayable.
+
+**This broke the documented trust model.** `atrum-build-plan.md` states a broken
+sequencer "can't steal funds, only halt the market" — safety was not supposed to depend
+on it. The shipped sequencer used uniform random field elements and did not exploit
+this; the contract permitted it, so a compromised sequencer key was a full drain.
+
+### The fix, and why it is free
+
+`queuePadding` is removed. `flushBatch` now derives the remainder of the subtree
+itself:
+
+```
+filler = keccak256(PAD_DOMAIN, treeStart, slot) % FIELD_SIZE
+```
+
+Nobody chooses a filler, so nobody knows a note preimage for one. `treeStart` is unique
+per batch, so two batches can never derive the same value.
+
+**Privacy cost: none.** The old justification for sequencer-chosen random fillers was
+that padding must be indistinguishable from real commitments. That never held — in
+Phase 1 every real action is a public `deposit` or `bet` transaction, so an observer
+already knows exactly which leaves are real. Padding only ever bought liveness, which
+derived fillers buy equally well.
+
+**Gas cost: negative.** [MEASURED] `flushBatch(64)` went **2,791,576 → 2,788,274**.
+Submitting one real leaf instead of 64 saves more calldata than 63 keccaks cost. Action
+gas is unchanged: deposit 1,378,641 / bet 1,165,715 / redeem 1,137,360.
+
+keccak rather than Poseidon deliberately: a filler is never hashed in-circuit, so it
+does not need to be ZK-friendly, and Poseidon would cost 28,980 gas per filler against
+roughly 100.
+
+The derivation now exists in three implementations — `ShieldedPool._derivedFiller`,
+`circuits/scripts/atrum.mjs`, and `sequencer/src/tree.ts`. All three were checked to
+produce identical values, and `test_derivedFillerMatchesJsMirror` asserts contract
+against mirror, because a silent divergence would break every Merkle path with no
+diagnostic.
+
+`contracts/test/PaddingExploit.t.sol` is kept as a regression test: it now asserts the
+attack is unreachable rather than that it works.
+
+### [MEASURED] Field aliasing is blocked — but by the verifier, not by us
+
+Circom signals are BN254 scalar field elements, so `x` and `x + r` are the SAME element
+and any in-circuit constraint satisfied by one is satisfied by the other. Solidity does
+uint256 arithmetic and has no such equivalence. If a verifier accepted `x + r`:
+
+- `_unpackBetData(betData + r)` would mask out a different `units`, inflating a stake
+  from a note worth far less; and
+- `nullifierHash + r` would be a **different key** in the spent-nullifier mapping while
+  proving the same note — an unlimited double-spend.
+
+Both are rejected, and `contracts/test/FieldBoundary.t.sol` proves it for every public
+signal of both action verifiers. But they are rejected by the snarkjs-generated
+verifier's `checkField`:
+
+```solidity
+function checkField(v) { if iszero(lt(v, r)) { mstore(0, 0) return(0, 0x20) } }
+```
+
+**That is an external dependency doing safety-critical work.** The tests exist so that
+if anyone ever swaps in a hand-written or gas-optimised verifier that drops the check,
+CI fails there instead of the pool draining quietly.
+
+### Reviewed and found sound
+
+| Component | Finding |
+|---|---|
+| `note.circom` packing | Injective. `units` 64-bit, `outcome` 2-bit, `marketId` 32-bit, `recipient` 160-bit, all range-constrained |
+| `bet.circom` | Spent note's outcome hardcoded to 0, so a position cannot be re-bet after news lands. New commitment forced to differ from old |
+| `redeem.circom` | `recipient` bound in-circuit — a mempool watcher cannot swap in their own address |
+| `merkle.circom` | `DualMux` constrains the path bit boolean *inside* the template; root equality enforced |
+| `ParimutuelPool` | Solvency correct: payouts sum to `winning × total / winning = total`, truncation only rounds down, dust retained |
+| `MappingNullifierSet` | One-time irreversible `bindPool`, only-pool `spend` |
+| `ShieldedPool` constructor | Refuses a nullifier set that cannot enforce `isSpent` on-chain |
+| Action ordering | Nullifier burned before every external call |
+
+### [CORRECTION] A measurement mistake of our own
+
+The first run of the new checkup reported `bet` at 2,137,211 gas — over the envelope.
+That was the measurement, not the contract. Fixture reads are `vm.parseJson`
+cheatcodes and cost real gas; left inline as call arguments they land inside the
+`gasleft()` bracket. The inflation was ~971,000 gas, almost exactly one Groth16 verify,
+which reads convincingly like a contract problem. Hoisted out, `bet` is 1,147,713.
+
+`ShieldedPool.t.sol` already carried a comment warning about this. Heed it: **always
+hoist cheatcode calls out of a measured region.**
+
+---
+
 ## 2. Chain parameters [MEASURED]
 
 Monad mainnet, chain 143, at block 91,560,339:

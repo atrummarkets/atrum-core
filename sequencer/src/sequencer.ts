@@ -9,14 +9,17 @@
  *      ~1,107,646 gas against a 2,000,000 envelope that already holds a ~1,029,454
  *      verify -- it does not fit. Batching is a correctness requirement of the gas
  *      budget, not an optimisation.
- *   3. Pad partial batches with unspendable filler so a quiet market still settles.
+ *   3. Submit partial batches; the CONTRACT pads them with derived fillers.
  *   4. Rotate relayer accounts so batches do not all trace to one address.
  *
  * What the sequencer CANNOT do, by construction:
  *   - Learn which note a bet spent. It sees the same public signals as everyone else.
  *   - Graft a commitment nobody queued. `flushBatch` compares the submitted leaves
  *     against the on-chain queue.
- *   - Spend a filler it created. Only `deposit` binds a commitment to paid collateral.
+ *   - Choose a padding leaf. Fillers are derived on-chain from
+ *     keccak256(PAD_DOMAIN, treeStart, slot), so it cannot author a spendable one.
+ *     A sequencer-chosen filler used to be a full vault drain -- see
+ *     contracts/test/PaddingExploit.t.sol.
  *
  * What it CAN do: stall. It is trusted for liveness and ordering only.
  */
@@ -29,7 +32,14 @@ import {
   type PublicClient,
   type WalletClient,
 } from "viem";
-import { CommitmentTree, BATCH_SIZE, FIELD_SIZE, initHasher, type MerklePath } from "./tree.ts";
+import {
+  CommitmentTree,
+  BATCH_SIZE,
+  FIELD_SIZE,
+  initHasher,
+  derivedFiller,
+  type MerklePath,
+} from "./tree.ts";
 import { RelayerPool } from "./relayers.ts";
 
 export const POOL_ABI = parseAbi([
@@ -39,7 +49,6 @@ export const POOL_ABI = parseAbi([
   "function insertedCount() view returns (uint256)",
   "function pendingCommitments(uint256) view returns (uint256)",
   "function flushBatch(uint256[] calldata leaves)",
-  "function queuePadding(uint256[] calldata fillers)",
   "function BATCH_SIZE() view returns (uint256)",
 ]);
 
@@ -125,24 +134,6 @@ export class Sequencer {
   }
 
   /**
-   * Unspendable filler drawn from the same distribution as real commitments.
-   *
-   * Uniform field elements, not a recognisable constant. A constant would be worse than
-   * no padding: it would mark exactly which slots in each batch are genuine, collapsing
-   * the anonymity set from BATCH_SIZE to the number of real actions.
-   */
-  private makeFillers(count: number): bigint[] {
-    const fillers: bigint[] = [];
-    const bytes = new Uint8Array(32);
-    for (let i = 0; i < count; i++) {
-      crypto.getRandomValues(bytes);
-      const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-      fillers.push(BigInt("0x" + hex) % FIELD_SIZE);
-    }
-    return fillers;
-  }
-
-  /**
    * Graft one batch if there is work to do. Returns true if a batch was submitted.
    *
    * A batch is submitted when 64 real commitments are queued, or when the oldest
@@ -167,16 +158,25 @@ export class Sequencer {
 
     if (pending < BATCH_SIZE && !deadlineHit) return false;
 
-    if (pending < BATCH_SIZE) {
-      await this.submit("queuePadding", [this.makeFillers(BATCH_SIZE - pending)]);
+    // Submit only the REAL queued commitments. `flushBatch` pads the rest of the
+    // subtree with fillers it derives itself, so there is nothing here to choose --
+    // a sequencer-chosen filler was a full vault drain (PaddingExploit.t.sol).
+    const real = Math.min(pending, BATCH_SIZE);
+    const treeStart = await this.readTreeNextIndex();
+
+    const realLeaves: bigint[] = [];
+    for (let i = 0; i < real; i++) {
+      realLeaves.push(await this.read("pendingCommitments", [inserted + BigInt(i)]));
     }
 
-    const leaves: bigint[] = [];
-    for (let i = 0; i < BATCH_SIZE; i++) {
-      leaves.push(await this.read("pendingCommitments", [inserted + BigInt(i)]));
-    }
+    await this.submit("flushBatch", [realLeaves]);
 
-    await this.submit("flushBatch", [leaves]);
+    // Mirror the same padding the contract applied, or the next Merkle path served
+    // from here is built against a root the chain does not have.
+    const leaves = [...realLeaves];
+    for (let slot = real; slot < BATCH_SIZE; slot++) {
+      leaves.push(derivedFiller(treeStart, BigInt(slot)));
+    }
     this.tree.insertBatch(leaves);
     this.firstPendingSeenAt = null;
 
@@ -203,6 +203,21 @@ export class Sequencer {
       address: treeAddress,
       abi: parseAbi(["function root() view returns (uint256)"]),
       functionName: "root",
+    })) as bigint;
+  }
+
+  /** The tree position the next batch will graft at -- the nonce for derived padding. */
+  private async readTreeNextIndex(): Promise<bigint> {
+    const treeAddress = (await this.publicClient.readContract({
+      address: this.config.poolAddress,
+      abi: parseAbi(["function tree() view returns (address)"]),
+      functionName: "tree",
+    })) as Address;
+
+    return (await this.publicClient.readContract({
+      address: treeAddress,
+      abi: parseAbi(["function nextIndex() view returns (uint256)"]),
+      functionName: "nextIndex",
     })) as bigint;
   }
 

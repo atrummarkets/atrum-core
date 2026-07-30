@@ -33,6 +33,7 @@ import {
   packBetData,
   packPayoutData,
   packMarketMeta,
+  derivedFiller,
   FIELD_SIZE,
 } from "./atrum.mjs";
 
@@ -127,14 +128,22 @@ async function main() {
   // -------------------------------------------------------------------------
   // 2. Sequencer grafts batch 1: the real deposit plus 63 fillers.
   // -------------------------------------------------------------------------
+  // Only the real commitment is submitted. The CONTRACT derives the remaining 63
+  // fillers, so the mirror must derive the identical values or the root diverges and
+  // every Merkle path built here fails on-chain.
   const batch1 = [depositCommitment];
-  while (batch1.length < BATCH_SIZE) batch1.push(randomField());
+  while (batch1.length < BATCH_SIZE) {
+    batch1.push(derivedFiller(0, batch1.length));
+  }
   for (const leaf of batch1) tree.insert(leaf);
 
   const rootAfterBatch1 = tree.root();
   const depositPath = tree.path(0);
 
   fixtures.batch1 = batch1.map((x) => x.toString());
+  fixtures.batch1Real = [depositCommitment.toString()];
+  fixtures.derivedFiller_0_1 = derivedFiller(0, 1).toString();
+  fixtures.derivedFiller_0_63 = derivedFiller(0, 63).toString();
   fixtures.rootAfterBatch1 = rootAfterBatch1.toString();
 
   // -------------------------------------------------------------------------
@@ -190,13 +199,16 @@ async function main() {
   // 4. Sequencer grafts batch 2, carrying the position note.
   // -------------------------------------------------------------------------
   const batch2 = [positionCommitment];
-  while (batch2.length < BATCH_SIZE) batch2.push(randomField());
+  while (batch2.length < BATCH_SIZE) {
+    batch2.push(derivedFiller(BATCH_SIZE, batch2.length));
+  }
   for (const leaf of batch2) tree.insert(leaf);
 
   const rootAfterBatch2 = tree.root();
   const positionPath = tree.path(BATCH_SIZE);
 
   fixtures.batch2 = batch2.map((x) => x.toString());
+  fixtures.batch2Real = [positionCommitment.toString()];
   fixtures.rootAfterBatch2 = rootAfterBatch2.toString();
 
   // -------------------------------------------------------------------------

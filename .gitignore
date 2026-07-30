@@ -23,6 +23,11 @@ circuits/build/*.wasm
 circuits/build/*.zkey
 circuits/build/*_verifier.sol
 circuits/build/*_proof.json
+# Exception, committed deliberately: padding-exploit.json pins the exact attack that
+# `queuePadding` allowed, so PaddingExploit.t.sol can assert it stays unreachable without
+# a 4-minute proof regeneration. It holds a commitment, a proof and public signals --
+# no nullifier, no secret, nothing spendable.
+!circuits/build/padding-exploit.json
 circuits/build/*_calldata.json
 
 # Powers-of-tau: 9.5 MB, downloaded on demand by scripts/build.sh
