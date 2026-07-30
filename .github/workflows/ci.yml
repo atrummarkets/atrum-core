@@ -60,11 +60,20 @@ jobs:
           node scripts/prove.mjs
           node scripts/gen_action_fixtures.mjs
 
+      - name: Install forge-std
+        working-directory: contracts
+        run: forge install foundry-rs/forge-std --no-git || forge install foundry-rs/forge-std
+
+      # The generated Groth16 verifiers are build artefacts, not source -- they are
+      # gitignored and produced from the zkeys. Without this the whole suite fails to
+      # compile on "src/verifiers/DepositVerifier.sol not found", because the tests
+      # replay real proofs against real verifiers and there is no mock to fall back on.
+      - name: Export generated verifiers into contracts
+        run: make verifiers
+
       - name: Forge tests
         working-directory: contracts
-        run: |
-          forge install foundry-rs/forge-std --no-git || forge install foundry-rs/forge-std
-          forge test --network monad -vv
+        run: forge test --network monad -vv
 
       - name: Formatting
         working-directory: contracts
@@ -140,11 +149,20 @@ jobs:
             https://github.com/iden3/circom/releases/latest/download/circom-linux-amd64
           chmod +x /usr/local/bin/circom
 
-      - name: Build circuits and export verifiers
+      - name: Build circuits, generate proofs, export verifiers
         run: |
-          cd circuits && npm ci && ./scripts/build.sh && cd ..
-          cd contracts && forge install foundry-rs/forge-std --no-git || true
-          cd .. && make verifiers
+          cd circuits
+          npm ci
+          ./scripts/build.sh
+          # measure_verifier.py reads `<circuit>_calldata.json`, which only these two
+          # scripts write. Without them the guard dies on a missing file rather than on
+          # anything to do with gas.
+          node scripts/prove.mjs
+          node scripts/gen_action_fixtures.mjs
+          cd ../contracts
+          forge install foundry-rs/forge-std --no-git || true
+          cd ..
+          make verifiers
 
       - name: Gate + uniformity, against live Monad
         run: |
