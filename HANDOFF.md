@@ -17,10 +17,11 @@ Groth16 proof.
 |---|---|---|
 | **0** — kill the risk | Vault skeleton, ElGamal circuit, real gas measurement | **complete, gate passed** |
 | **1** — market, public pools | Vault, ShieldedPool, 3 circuits, parimutuel, sequencer, CI | **complete, 1 critical fixed** |
-| **2** — encrypted pools | Accumulator, `Enc(m)` in-circuit, publisher | not started |
+| **2** — encrypted pools | Accumulator, `Enc(m)` in-circuit, private redeem, publisher | **~40%** — three components built and verified, **none wired** |
 | **3** — product | Frontend, resolver, seeded markets, threshold committee | not started |
 
-**115 tests passing** — 102 Solidity under the Monad gas schedule, 13 sequencer.
+**145 Solidity tests + 29 circuit soundness attacks + 155 curve vectors + 13 sequencer tests**
+passing.
 Everything numeric below is reproducible with the commands in §6.
 
 **A security review of Phase 1 found and fixed one critical vulnerability**: the
@@ -37,6 +38,85 @@ Phase 1's milestone is *shielded positions, public pool total*. It is an interna
 milestone, not a launch. Redemption is still public, and per the build plan that makes
 the privacy claim **false rather than degraded** — so the honest description today is
 *anonymous-participant parimutuel market*. Phase 2 is what earns the other one.
+
+---
+
+## 1b. Phase 2 — where it actually stands
+
+Three components are built and verified in isolation. **Nothing is wired together**, and the
+remaining work is mostly integration — which is where the one critical bug of Phase 1 came
+from, so that distinction is load-bearing rather than pedantic.
+
+| Piece | Built | Verified | Wired |
+|---|---|---|---|
+| `ElGamalAccumulator` + `BabyJubJub` | yes | 19 tests vs circomlibjs, gate measured | **no** |
+| `bet_encrypted.circom` | yes | 29 soundness attacks | **no** |
+| `ChaumPedersen` (DLEQ decryption proof) | yes | 13 tests, optimised 3.06x | **no** |
+| Single disclosed committee key | yes | generated circom include, cannot drift from the key file | n/a |
+| Private redeem | **no** | — | — |
+| Withdraw circuit | **no** | — | — |
+| Publisher (cadence, BSGS, ratio) | **no** | BSGS exists only inside `prove.mjs` | — |
+| `ShieldedPool` Phase 2 path | **no** | — | — |
+
+### Gaps inside what looks finished
+
+- **`bet_encrypted` has never produced a real proof.** It compiles at 21,250 constraints and
+  its soundness was verified via *witness generation*, which decides constraint satisfaction
+  and needs no trusted setup. But it requires **ptau power 15** (>16,384), and setup has not
+  been run. There is no zkey, no verifier, and **the 8-public-signal verify cost is
+  UNMEASURED** — ~1,155,000 is an extrapolation from the reference, not a measurement.
+- Phase 2 raises public signals from 4 to 8 (the ciphertext is four field elements the
+  contract must actually add, so it cannot be hashed away for free). At a measured 30,756
+  gas per signal that is ~123,000 more per bet.
+
+### The accumulator gate — PASSED
+
+Measured against genuinely cold storage, the state a real bet finds:
+
+| Layout | cold | warm |
+|---|---|---|
+| extended (X,Y,T,Z — 8 slots, no inversion) | 185,399 — **does not fit** | 15,799 |
+| affine (x,y — 4 slots, 2 inversions) | **122,270 — fits, 61,699 spare** | 18,870 |
+
+A real testnet deposit leaves 183,969 gas of headroom. `accumulateAffine` is the production
+path; the extended variant is kept and still measured so the choice stays evidence-backed.
+
+The homomorphic property is demonstrated on-chain, not assumed: accumulating `Enc(50)` then
+`Enc(20)` lands on exactly the ciphertext circomlibjs computes for `Enc(70)`.
+
+### Two guards that died when `units` went private
+
+This is the Phase 2 failure mode worth internalising:
+
+> **When a value goes private, every Solidity guard on it dies silently.** The contract still
+> compiles. The tests still pass. The check is simply gone.
+
+An audit of all ten guards in Phase 1's `bet` found exactly two whose input no longer exists
+in Phase 2 — `units == 0` and `addStake(..., units)`. Both are handled (a circuit constraint
+and the ciphertext accumulator respectively). The other eight operate on values that are
+still public and survive unchanged.
+
+A third gap was found the same way: `encRandomness = 0` was accepted, which makes
+`C1 = identity` and `C2 = [units]G`, so anyone recovers the stake by discrete log. Alone that
+is self-inflicted — but a compromised frontend could force it on every user, publishing every
+bet while the contract sees nothing wrong. Now constrained in-circuit AND guarded at the
+contract (`DegenerateCiphertext`), because the failure mode is completely silent.
+
+### [CORRECTION to the plan] Decryption proofs are Phase 2, not Phase 3
+
+`nisi-master-reference.md` §V6 lists Chaum-Pedersen decryption proofs as "REQUIRED once the
+committee is t-of-n" — Phase 3. That is mis-phased.
+
+The moment payouts derive from a decrypted ratio, whoever publishes that ratio can drain the
+vault: publish a ratio favouring one side and its holders are overpaid, and nothing on-chain
+can detect it, because checking a ratio against a ciphertext *is* this proof. Phase 1 had no
+such exposure — the contract computed payouts from its own plaintext totals, so the publisher
+could not lie about them. **Encrypting the pool is what creates the hole.**
+
+So the proof is required as soon as the pool goes dark, even with a single key. Without it,
+"single decryption key, disclosed plainly" is not a privacy caveat — it is unilateral
+authority over everyone's collateral. Measured cost makes this easy: **$0.05/day** for hourly
+publishing.
 
 ---
 
@@ -65,6 +145,7 @@ against live Monad nodes rather than taken on trust.
 | Groth16 verify, 4 public inputs | 1,031,828 | **1,029,454** | −0.2%, essentially exact |
 | Per public input | ~30,000 | **30,756** | confirms |
 | **Monad reprices BN254 ~5x, leaves BLS12-381 alone** | central thesis | **confirmed** | the fact the whole architecture rests on |
+| `mulmod` / `addmod` | not listed as repriced | **10 gas, identical on both chains** | confirmed not repriced |
 | **Homomorphic addition works** | `Enc(50)+Enc(20)=Enc(70)` | **decrypts to exactly 70** | mechanism proven, not assumed |
 | **Sequencer must always batch** | asserted | **confirmed with a number** | unbatched bet = 106% of gas envelope |
 | Curve choice BN254 + BabyJubJub | forced, not preferred | **confirmed by building it** | ElGamal proves correctly in-circuit |
@@ -76,6 +157,8 @@ against live Monad nodes rather than taken on trust.
 | **Production circuit padding** | "+15% to 25% over the verifier core" | **−0.2%** | Returns the whole safety margin. Real headroom vs the 1.5M gate is 32%, not ~10%. Verify cost is nearly all precompile cost, and snarkjs emits tight assembly, so there is nothing to pad. |
 | **`modexp` 256-bit inverse** | 4,712 | **4,048** | Ours is exactly `16 × 253`, EIP-7883's formula; the zero-length probe returned exactly 500, EIP-7883's raised minimum. Not blocking — `modexp` is only for field inversion and the design forbids inversion in the hot path. |
 | **Indexed nullifier tree** | recommended, to keep state root-only | **mapping is 24x cheaper — 28,945 vs 690,733** | **661,788 gas saved per bet.** An indexed tree only earns its cost if non-membership must be proved in-circuit; double-spend prevention needs plain membership. **Recommendation: mapping for nullifiers, Merkle tree only for commitments.** Tradeoff accepted: unbounded state growth. |
+| **Threshold decryption proof "~180,000 gas"** | §V6, `[DERIVED]` as 6 × ecMul at t=3 | **895,842 measured** (2,741,396 before optimisation) | **5x off, and the derivation is invalid.** `ecMul` at 0x07 operates on alt_bn128 G1 — short Weierstrass over the BN254 *base* field. BabyJubJub is twisted Edwards over the *scalar* field, so the precompile cannot touch these points and every scalar multiplication is hand-written Solidity. Still affordable: $0.05/day hourly. |
+| **Accumulator "BN254 via ecAdd precompile, 4 slots — 600 gas"** | §1.3 | **option does not exist** | Same reason: `ecAdd` is the wrong curve and the wrong field for BabyJubJub. The accumulator is hand-written field arithmetic. |
 | **"A broken sequencer can't steal funds, only halt the market"** | build plan §8 trust model | **false as built — now true** | `queuePadding` let the sequencer author spendable notes and drain the whole vault. Proved with a real Groth16 proof (0 deposited → 5,000 USDC out). **Fixed:** padding is now derived on-chain from `keccak256(PAD_DOMAIN, treeStart, slot)`, so nobody chooses it. Regression test kept. See MEASUREMENTS.md §1d. |
 | **"Fillers are unspendable by construction"** | `ShieldedPool.queuePadding` comment | **false** | `deposit.circom` binds commitment↔amount for deposits, but nothing forced every leaf to come from a deposit, and `redeem.circom` never checks provenance. |
 | **"Prediction markets have thin liquidity and low adoption"** | §11 demand risk | **stale** | Polymarket did $8.9–10.5B/month in 2026, 1.29M wallets in Q1, ICE invested up to $2B at ~$9B valuation. Category demand is proven. The risk moved (see §5). |

@@ -23,6 +23,10 @@ library BabyJubJub {
     /// @notice BN254 scalar field = BabyJubJub base field.
     uint256 internal constant Q = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
 
+    /// @notice circomlib's canonical order-8 base point.
+    uint256 internal constant BASE8X = 5299619240641551281634865583518297030282874472190772894086521144482721001553;
+    uint256 internal constant BASE8Y = 16950150798460657717958625567821834550301663161624707787222815936182638968203;
+
     uint256 internal constant A = 168700;
     uint256 internal constant D = 168696;
 
@@ -104,6 +108,156 @@ library BabyJubJub {
             if iszero(staticcall(gas(), 0x05, p, 0xc0, p, 0x20)) { revert(0, 0) }
             result := mload(p)
         }
+    }
+
+    /// @notice BabyJubJub prime-order subgroup order. Scalars live mod L.
+    uint256 internal constant L = 2736030358979909402780800718157159386076813972158567259200215660948447373041;
+
+    /// @dev `dst += src` in place, same HWCD formula as `add`, but with no per-operation
+    ///      allocation.
+    ///
+    ///      This is where the gas was. The struct form allocates a fresh 4-word `Point` per
+    ///      operation and a ladder performs ~500 of them -- measured at ~1,200 gas per point
+    ///      operation against roughly 110 gas of actual field arithmetic, i.e. ~90%
+    ///      allocation overhead. Both arrays here are allocated once by the caller.
+    ///
+    ///      Takes two array pointers rather than twelve stack values: eight parameters plus
+    ///      four returns plus eight intermediates exceeds the EVM stack under non-IR
+    ///      codegen, and `via_ir` is deliberately off in this repo because enabling it would
+    ///      change every gas figure in MEASUREMENTS.md.
+    ///
+    ///      ALIASING: `src` may be `dst` -- that is how doubling is done. Every read of both
+    ///      arrays completes before the first write, so the aliased case is correct. Do not
+    ///      reorder the assignments above the reads. The corpus covers this directly with
+    ///      power-of-two scalars, which exercise the doubling path and nothing else.
+    function _addAssign(uint256[4] memory dst, uint256[4] memory src) private pure {
+        // Yul, because the cost here is Solidity's stack management -- not the arithmetic
+        // and not the function call. Measured decomposition: `mulmod` and `addmod` are 10
+        // gas each on Monad (identical to Ethereum -- NOT repriced, verified in
+        // ArithRepricing.t.sol), so the sixteen operations below are ~160 gas. A Solidity
+        // implementation of the same formula measured ~1,300, because eight-plus live
+        // 256-bit intermediates exceed what the non-IR stack allocator keeps in registers
+        // and the remainder spills to memory. An inline-Solidity version measured WORSE
+        // than the function-call version for exactly that reason.
+        //
+        // The scoping below is deliberate: operands are read and released in an order that
+        // keeps the live set small (peak ~7 values), which is what avoids the spills.
+        //
+        // `sub(q, v)` is unchecked negation mod q. Every `v` here is a `mulmod` result and
+        // therefore already < q, so it cannot underflow. Note `sub(q, 0) == q` and
+        // `addmod(x, q, q) == x`, so the zero case is still correct.
+        assembly {
+            let q := 21888242871839275222246405745257275088548364400416034343698204186575808495617
+            let e
+            let h
+
+            {
+                let x1 := mload(dst)
+                let y1 := mload(add(dst, 0x20))
+                let x2 := mload(src)
+                let y2 := mload(add(src, 0x20))
+
+                let a := mulmod(x1, x2, q)
+                let b := mulmod(y1, y2, q)
+
+                e := mulmod(addmod(x1, y1, q), addmod(x2, y2, q), q)
+                e := addmod(addmod(e, sub(q, a), q), sub(q, b), q)
+
+                h := addmod(b, sub(q, mulmod(168700, a, q)), q)
+            }
+
+            let f
+            let g
+            {
+                let c := mulmod(mulmod(168696, mload(add(dst, 0x40)), q), mload(add(src, 0x40)), q)
+                let d := mulmod(mload(add(dst, 0x60)), mload(add(src, 0x60)), q)
+                f := addmod(d, sub(q, c), q)
+                g := addmod(d, c, q)
+            }
+
+            // Every read of dst and src is complete before this point, so aliasing
+            // (src == dst, which is how doubling is done) is safe.
+            mstore(dst, mulmod(e, f, q))
+            mstore(add(dst, 0x20), mulmod(g, h, q))
+            mstore(add(dst, 0x40), mulmod(e, h, q))
+            mstore(add(dst, 0x60), mulmod(f, g, q))
+        }
+    }
+
+    /// @notice `[k]P`, for a scalar that is PUBLIC.
+    ///
+    /// @dev THE NAME IS THE WARNING. This is a plain double-and-add ladder: the additions
+    ///      it performs depend on the bits of `k`, so gas consumption and trace shape leak
+    ///      the scalar. That is fine for its only current caller -- Chaum-Pedersen
+    ///      verification operates entirely on published proof data, where there is no
+    ///      secret to leak and a constant-time ladder would be paying gas to defend against
+    ///      nothing.
+    ///
+    ///      It is NOT fine for a secret scalar. If a future caller needs `[secret]P`
+    ///      on-chain, this function is the wrong one and a constant-time ladder is required.
+    ///      The `Public` suffix exists so that misuse has to be typed out explicitly rather
+    ///      than reached by accident.
+    ///
+    ///      `k` is reduced mod L first: an unreduced scalar would otherwise run past the
+    ///      252-bit loop bound and silently compute the wrong point.
+    function scalarMulPublic(Point memory p, uint256 k) internal pure returns (Point memory r) {
+        k = k % L;
+
+        // Accumulator starts at the identity (0, 1, 0, 1). Both live in memory arrays
+        // allocated once and mutated in place -- see `doubleScalarMulPublic` for why.
+        uint256[4] memory acc = [uint256(0), uint256(1), uint256(0), uint256(1)];
+        uint256[4] memory cur = [p.x, p.y, p.t, p.z];
+
+        // 252 bits covers L (~2^251.1).
+        for (uint256 i = 0; i < 252; i++) {
+            if ((k >> i) & 1 == 1) _addAssign(acc, cur);
+            _addAssign(cur, cur);
+        }
+
+        r = Point(acc[0], acc[1], acc[2], acc[3]);
+    }
+
+    /// @notice `[a]P + [b]Q` in one interleaved ladder (Straus), for PUBLIC scalars.
+    ///
+    /// @dev Chaum-Pedersen verifies two equations of exactly this shape, so computing each
+    ///      jointly halves the doublings: one shared ladder instead of two.
+    ///
+    ///      Working state lives in `uint256[4]` memory arrays allocated ONCE and mutated in
+    ///      place, rather than flat stack locals. Twelve simultaneous locals exceeds the
+    ///      EVM stack under non-IR codegen, and `via_ir` is deliberately off in this repo
+    ///      because enabling it would change every gas figure in MEASUREMENTS.md. In-place
+    ///      arrays recover the point that mattered anyway -- the cost was never memory, it
+    ///      was allocating a fresh 4-word struct per point operation, ~500 times per ladder.
+    ///
+    ///      Same public-scalar caveat as `scalarMulPublic`, for the same reason and with the
+    ///      same suffix.
+    function doubleScalarMulPublic(Point memory p, uint256 a, Point memory q, uint256 b)
+        internal
+        pure
+        returns (Point memory r)
+    {
+        a = a % L;
+        b = b % L;
+
+        uint256[4] memory acc = [uint256(0), uint256(1), uint256(0), uint256(1)];
+        uint256[4] memory pp = [p.x, p.y, p.t, p.z];
+        uint256[4] memory qq = [q.x, q.y, q.t, q.z];
+
+        for (uint256 i = 0; i < 252; i++) {
+            if ((a >> i) & 1 == 1) _addAssign(acc, pp);
+            if ((b >> i) & 1 == 1) _addAssign(acc, qq);
+            _addAssign(pp, pp);
+            _addAssign(qq, qq);
+        }
+
+        r = Point(acc[0], acc[1], acc[2], acc[3]);
+    }
+
+    /// @notice `-P`. On a twisted Edwards curve negation is `(x, y) -> (-x, y)`.
+    /// @dev Free, which is what lets `A + [e]H == [z]G` be rearranged into a single
+    ///      interleaved ladder: `[z]G + [e](-H) == A`.
+    function negate(Point memory p) internal pure returns (Point memory) {
+        return Point(p.x == 0 ? 0 : Q - p.x, p.y, p.t == 0 ? 0 : Q - p.t, p.z);
     }
 
     /// @notice Is `(x, y)` actually on the curve?

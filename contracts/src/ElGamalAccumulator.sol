@@ -36,13 +36,26 @@ import {BabyJubJub} from "./BabyJubJub.sol";
 ///        - AFFINE (x,y): 2 slots per point, 4 per ciphertext, but every update needs one
 ///          inversion to project back -- a `modexp` call, measured at 4,048 gas on Monad.
 ///
-///      On Ethereum, avoiding inversion is the obvious call. On Monad the cold-SLOAD
-///      surcharge is 4x while `modexp` is unchanged, so 4 fewer slots buys roughly
-///      4 x 8,100 = 32,400 gas against ~4,048 for the inversion. **The usual answer may
-///      invert here.** Both are implemented so the comparison is a measurement.
+///      MEASURED, against genuinely cold storage -- the state a real bet finds, since each
+///      bet is its own transaction:
 ///
-///      Slots are declared contiguously on purpose: MIP-8 states 128 contiguous slots
-///      share one 4 KB page and are warm after a single cold touch.
+///                                        cold      warm
+///        extended (8 slots)           185,399    15,799
+///        affine   (4 slots)           122,270    18,870
+///
+///      A real testnet deposit leaves 183,969 gas of envelope headroom, so **extended does
+///      not fit and affine does**, with 61,699 to spare. `accumulateAffine` is the
+///      production path. The extended variant is kept and still measured so the decision
+///      stays evidence-backed and a future gas change that reverses it fails CI.
+///
+///      Two guesses that measurement killed, recorded so they are not re-guessed:
+///        - We expected Monad's 4x cold SLOAD to flip the usual extended-beats-affine
+///          answer. It does not: affine wins at Ethereum pricing too (53,485 vs 89,894).
+///        - We then expected MIP-8 page-sharing to explain why extended costs the same on
+///          both chains. It does not either -- `StorageContiguity.t.sol` measures
+///          contiguity at only ~2,600 gas, and Monad charges the full per-slot surcharge.
+///          The real explanation was a flawed measurement: `initMarket` had warmed the
+///          slots before the "cold" figure was taken.
 contract ElGamalAccumulator {
     using BabyJubJub for BabyJubJub.Point;
 
@@ -81,6 +94,7 @@ contract ElGamalAccumulator {
     error InvalidOutcome();
     error NotOnCurve();
     error NotInitialised();
+    error DegenerateCiphertext();
     error AlreadyInitialised();
 
     modifier onlyPool() {
@@ -146,6 +160,7 @@ contract ElGamalAccumulator {
         if (!BabyJubJub.isOnCurve(c1x, c1y) || !BabyJubJub.isOnCurve(c2x, c2y)) {
             revert NotOnCurve();
         }
+        _rejectDegenerateC1(c1x, c1y);
 
         CiphertextExt storage acc = _extended[marketId][outcome];
 
@@ -175,6 +190,7 @@ contract ElGamalAccumulator {
         if (!BabyJubJub.isOnCurve(c1x, c1y) || !BabyJubJub.isOnCurve(c2x, c2y)) {
             revert NotOnCurve();
         }
+        _rejectDegenerateC1(c1x, c1y);
 
         CiphertextAffine storage acc = _affine[marketId][outcome];
 
@@ -192,6 +208,21 @@ contract ElGamalAccumulator {
         acc.c2y = y2;
 
         emit StakeAccumulated(marketId, outcome);
+    }
+
+    /// @notice Refuse a ciphertext whose C1 is the identity.
+    ///
+    /// @dev `C1 = [r]G`, and it equals the identity only when `r = 0` -- in which case
+    ///      `C2 = [units]G` and anyone can recover the stake by discrete log. The
+    ///      ciphertext is not a ciphertext.
+    ///
+    ///      `bet_encrypted.circom` already constrains `r != 0`, so an honest prover cannot
+    ///      reach this. It is checked again here because the consequence is silent: a
+    ///      degenerate ciphertext accumulates perfectly well and simply publishes the
+    ///      bettor's stake, and neither the contract nor the bettor would see an error.
+    ///      Second layer, for a failure mode with no other alarm.
+    function _rejectDegenerateC1(uint256 c1x, uint256 c1y) private pure {
+        if (c1x == 0 && c1y == 1) revert DegenerateCiphertext();
     }
 
     // -----------------------------------------------------------------------

@@ -294,6 +294,35 @@ contract ElGamalAccumulatorTest is Test {
         vm.stopPrank();
     }
 
+    /// @notice A ciphertext with C1 = identity must be refused.
+    /// @dev `C1 = [r]G` is the identity only when `r = 0`, and then `C2 = [units]G` --
+    ///      anyone can recover the stake by discrete log, so the ciphertext is not a
+    ///      ciphertext. `bet_encrypted.circom` constrains `r != 0`, so an honest prover
+    ///      cannot reach this; it is checked again because the failure is SILENT. A
+    ///      degenerate ciphertext accumulates perfectly well and simply publishes the
+    ///      bettor's stake, with no error anywhere.
+    function test_rejectsDegenerateCiphertext() public {
+        vm.startPrank(pool);
+
+        // C1 = identity, C2 = a valid curve point.
+        vm.expectRevert(ElGamalAccumulator.DegenerateCiphertext.selector);
+        acc.accumulateExtended(MARKET_ID, YES, 0, 1, _u(".curve.base8[0]"), _u(".curve.base8[1]"));
+
+        vm.expectRevert(ElGamalAccumulator.DegenerateCiphertext.selector);
+        acc.accumulateAffine(MARKET_ID, NO, 0, 1, _u(".curve.base8[0]"), _u(".curve.base8[1]"));
+
+        vm.stopPrank();
+    }
+
+    /// @notice A degenerate C2 is fine -- C2 = identity just means units = 0 with r = 0,
+    ///         and the r != 0 guard already caught that. Only C1 is checked, deliberately.
+    function test_identityC2IsNotRejectedByItself() public {
+        vm.prank(pool);
+        // Valid C1, identity C2. Should pass the degeneracy guard (curve check allows it).
+        acc.accumulateExtended(MARKET_ID, YES, _u(".curve.base8[0]"), _u(".curve.base8[1]"), 0, 1);
+        assertTrue(true, "identity C2 alone is not treated as degenerate");
+    }
+
     function test_yesAndNoAccumulateIndependently() public {
         vm.prank(pool);
         acc.accumulateExtended(
