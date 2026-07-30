@@ -47,6 +47,15 @@ contract IncrementalMerkleTree {
 
     IPoseidonT3 public immutable hasher;
 
+    /// @notice The only address allowed to append leaves.
+    /// @dev Not optional. The tree IS the anonymity set: an unpermissioned append lets
+    ///      anyone insert commitments nobody can spend, or exhaust the 2^DEPTH capacity
+    ///      outright. It also breaks the batching invariant the gas budget depends on --
+    ///      `insertSubtree` requires size-aligned power-of-two batches, so a stray
+    ///      single insert from an outsider desynchronises the sequencer's mirror and
+    ///      every in-flight Merkle proof built against it.
+    address public immutable sequencer;
+
     /// @notice Current root. The ONLY tree state a proof needs to reference.
     uint256 public root;
 
@@ -78,11 +87,25 @@ contract IncrementalMerkleTree {
     error BatchTooLarge();
     error BatchNotPowerOfTwo();
     error BatchNotAligned();
+    error NotSequencer();
+    error InvalidSequencer();
+    error ZeroValueNotInField();
 
     event LeavesInserted(uint256 startIndex, uint256 count, uint256 newRoot);
 
-    constructor(IPoseidonT3 hasher_, uint256 zeroValue) {
+    modifier onlySequencer() {
+        if (msg.sender != sequencer) revert NotSequencer();
+        _;
+    }
+
+    constructor(IPoseidonT3 hasher_, uint256 zeroValue, address sequencer_) {
+        if (sequencer_ == address(0)) revert InvalidSequencer();
+        // The empty-leaf value is hashed like any other leaf, so it has the same
+        // field constraint. Out of range here would poison every `zeros[]` entry.
+        if (zeroValue >= FIELD_SIZE) revert ZeroValueNotInField();
+
         hasher = hasher_;
+        sequencer = sequencer_;
 
         // Build the empty-subtree hashes bottom-up. Done once at construction so
         // insertion never has to hash an empty subtree at runtime.
@@ -105,7 +128,7 @@ contract IncrementalMerkleTree {
     /// @dev Present for completeness and for measuring the unbatched cost. Real
     ///      traffic must go through `insertBatch` -- see the note above on why a
     ///      single insertion plus a verify does not fit the action envelope.
-    function insert(uint256 leaf) external returns (uint256 index) {
+    function insert(uint256 leaf) external onlySequencer returns (uint256 index) {
         uint256[] memory leaves = new uint256[](1);
         leaves[0] = leaf;
         return _insertBatch(leaves);
@@ -117,10 +140,7 @@ contract IncrementalMerkleTree {
     ///      saves almost nothing here (measured: 691,341 -> 603,556 per leaf from
     ///      N=1 to N=128, a mere 13%, and that only from storage warming). Use
     ///      `insertSubtree`.
-    function insertBatchSequential(uint256[] calldata leaves)
-        external
-        returns (uint256 start)
-    {
+    function insertBatchSequential(uint256[] calldata leaves) external onlySequencer returns (uint256 start) {
         if (leaves.length == 0) revert EmptyBatch();
         uint256[] memory copied = new uint256[](leaves.length);
         for (uint256 i = 0; i < leaves.length; i++) {
@@ -148,7 +168,7 @@ contract IncrementalMerkleTree {
     ///      batch is also the anonymity set, so a fixed batch size means a fixed,
     ///      predictable anonymity set rather than one that leaks how busy the market
     ///      currently is.
-    function insertSubtree(uint256[] calldata leaves) external returns (uint256 start) {
+    function insertSubtree(uint256[] calldata leaves) external onlySequencer returns (uint256 start) {
         uint256 n = leaves.length;
         if (n == 0) revert EmptyBatch();
 

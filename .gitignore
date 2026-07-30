@@ -32,6 +32,11 @@ circuits/build/*.ptau
 # is a throwaway test key, but never let this pattern become a habit -- in Phase 2
 # the equivalent file can decrypt the entire pool.
 circuits/build/committee-key.json
+
+# Generated from committee-key.json by scripts/gen_committee_key_circom.mjs. Public
+# key only, but it is a build artefact of a gitignored input -- committing it would
+# reintroduce the key-drift bug it exists to prevent.
+circuits/src/committee_key.circom
 .env
 .env.local
 *.pem
@@ -42,6 +47,12 @@ contracts/src/verifiers/*.sol
 
 # Measurement output
 circuits/build/gate-*.json
+
+# Real action proofs for the Solidity suite. Regenerable with `make fixtures`, and
+# regenerated with fresh randomness every time, so committing it would churn on every
+# build while adding nothing -- the vkeys below are the artefact worth pinning.
+circuits/build/action-fixtures.json
+circuits/build/*_calldata.json
 
 # OS
 .DS_Store

@@ -1,0 +1,21 @@
+{
+  "name": "atrum-sequencer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Batches shielded commitments into the Atrum tree and serves Merkle paths.",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "node --experimental-strip-types src/main.ts"
+  },
+  "dependencies": {
+    "circomlibjs": "^0.1.7",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

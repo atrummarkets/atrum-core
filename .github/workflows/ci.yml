@@ -1,0 +1,156 @@
+name: CI
+
+# Three files in this repo claimed checks were "guarded in CI" before this workflow
+# existed. They are guarded now.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  FOUNDRY_DIR: /home/runner/.foundry-monad
+
+jobs:
+  contracts:
+    name: Contracts (Monad gas schedule)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Monad Foundry, NOT upstream. Stock forge reports Ethereum's prices: ecMul
+      # 6,393 instead of 30,383 and cold SLOAD 2,115 instead of 8,115. Every gas
+      # assertion in this suite would pass against numbers that are wrong by ~5x.
+      # Upstream `foundryup` silently IGNORES --network monad, so the fork's installer
+      # is used and the version is asserted below.
+      - name: Install Monad Foundry
+        run: |
+          FOUNDRY_DIR=$FOUNDRY_DIR bash -c \
+            'curl -L https://foundry.category.xyz | bash'
+          FOUNDRY_DIR=$FOUNDRY_DIR $FOUNDRY_DIR/bin/foundryup --network monad
+          echo "$FOUNDRY_DIR/bin" >> $GITHUB_PATH
+
+      - name: Assert the Monad build, not upstream
+        run: |
+          forge --version
+          forge --version | grep -q 'monad' || {
+            echo "::error::not the Monad fork -- gas numbers would be wrong by ~5x"
+            exit 1
+          }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install circom
+        run: |
+          curl -sL -o /usr/local/bin/circom \
+            https://github.com/iden3/circom/releases/latest/download/circom-linux-amd64
+          chmod +x /usr/local/bin/circom
+          circom --version
+
+      # The contract suite etches circomlib's Poseidon and replays real Groth16 proofs,
+      # so circuits must be built before contracts can be tested. There is no mocked
+      # verifier anywhere in this suite, by design.
+      - name: Build circuits and generate proof fixtures
+        working-directory: circuits
+        run: |
+          npm ci
+          ./scripts/build.sh
+          node scripts/prove.mjs
+          node scripts/gen_action_fixtures.mjs
+
+      - name: Forge tests
+        working-directory: contracts
+        run: |
+          forge install foundry-rs/forge-std --no-git || forge install foundry-rs/forge-std
+          forge test --network monad -vv
+
+      - name: Formatting
+        working-directory: contracts
+        run: forge fmt --check
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: circuit-artifacts
+          path: |
+            circuits/build/*_vkey.json
+            circuits/build/action-fixtures.json
+          retention-days: 7
+
+  sequencer:
+    name: Sequencer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install circom
+        run: |
+          curl -sL -o /usr/local/bin/circom \
+            https://github.com/iden3/circom/releases/latest/download/circom-linux-amd64
+          chmod +x /usr/local/bin/circom
+
+      # The mirror is tested against the same fixture roots the contract suite asserts
+      # on-chain, so the fixtures have to exist here too.
+      - name: Build circuits and fixtures
+        working-directory: circuits
+        run: |
+          npm ci
+          ./scripts/build.sh
+          node scripts/gen_action_fixtures.mjs
+
+      - name: Typecheck and test
+        working-directory: sequencer
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npx vitest run
+
+  gas-uniformity:
+    name: Anti-fingerprinting guard (live RPC)
+    runs-on: ubuntu-latest
+    # Hits live Monad nodes via eth_call with state overrides -- no key, no deploy, no
+    # spend. Separated and retried because a flaky public RPC must not red the build,
+    # but the check itself is not optional: it is what stops a new action shipping with
+    # a snug gas limit that identifies which private action a user took.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Monad Foundry
+        run: |
+          FOUNDRY_DIR=$FOUNDRY_DIR bash -c \
+            'curl -L https://foundry.category.xyz | bash'
+          FOUNDRY_DIR=$FOUNDRY_DIR $FOUNDRY_DIR/bin/foundryup --network monad
+          echo "$FOUNDRY_DIR/bin" >> $GITHUB_PATH
+
+      - name: Install circom
+        run: |
+          curl -sL -o /usr/local/bin/circom \
+            https://github.com/iden3/circom/releases/latest/download/circom-linux-amd64
+          chmod +x /usr/local/bin/circom
+
+      - name: Build circuits and export verifiers
+        run: |
+          cd circuits && npm ci && ./scripts/build.sh && cd ..
+          cd contracts && forge install foundry-rs/forge-std --no-git || true
+          cd .. && make verifiers
+
+      - name: Gate + uniformity, against live Monad
+        run: |
+          for attempt in 1 2 3; do
+            make uniformity NETWORK=testnet && exit 0
+            echo "attempt $attempt failed, retrying"
+            sleep 20
+          done
+          exit 1

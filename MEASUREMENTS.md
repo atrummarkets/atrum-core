@@ -1,8 +1,10 @@
-# Atrum — Phase 0 measurements
+# Atrum — measurements, Phase 0 and Phase 1
 
 Everything here was measured by this repo's own tooling against **live Monad nodes**
 on 30 July 2026, not copied from `nisi-master-reference.md`. Where our number
 disagrees with the reference, both are shown and the disagreement is called out.
+Where a later measurement corrected an earlier claim *in this file*, that is called
+out too — see the [CORRECTION] blocks in §1b and §3.
 
 Labels follow the reference's convention:
 
@@ -12,15 +14,24 @@ Labels follow the reference's convention:
 | **[DERIVED]** | Arithmetic on our own measured values. Arithmetic shown. |
 | **[UNVERIFIED]** | We could not confirm it. Do not rely on it. |
 | **[CONTRADICTS]** | Our measurement disagrees with `nisi-master-reference.md`. |
+| **[CORRECTION]** | An earlier claim *in this file* was wrong. Both are shown. |
+| **[DECIDED]** | An open design question, settled by a measurement below. |
 
 Reproduce everything:
 
 ```bash
-python3 tools/monad_gas.py all --network mainnet     # chain params + precompiles
-python3 tools/measure_verifier.py --network mainnet  # the Phase 0 gate
-cd circuits && node scripts/prove.mjs               # mechanism correctness
-cd contracts && forge test --network monad          # Vault suite
+make circuits    # compile 5 circuits, Groth16 setup, export verifiers
+make prove       # ElGamal mechanism correctness
+make fixtures    # real deposit/bet/redeem proofs
+make verifiers   # copy generated verifiers into contracts/src
+make test        # 81 contract tests under the Monad gas schedule
+make gate        # verify gas, all 5 verifiers, live chain
+make uniformity  # anti-fingerprinting guard
+make measure     # chain params + precompiles, live chain
 ```
+
+Order matters on a clean checkout — the contract suite replays real proofs, so the
+circuits and fixtures must exist before `make test`.
 
 ---
 
@@ -29,15 +40,30 @@ cd contracts && forge test --network monad          # Vault suite
 The build plan's stop-line: if a production-shaped BabyJubJub-ElGamal Groth16
 verify exceeds **~1.5M gas**, stop and reassess the architecture.
 
-| Circuit variant | Public signals | Verify gas | % of 1.5M budget | Verdict |
-|---|---|---|---|---|
-| `probe_fixed_key` (key compiled in) | 4 | **1,029,454** | 68.6% | **PASS** |
-| `probe_pubkey_input` (key as input) | 6 | **1,090,965** | 72.7% | **PASS** |
+| Circuit variant | Public signals | Verify gas (warm) | Cold first call | % of 1.5M budget | Verdict |
+|---|---|---|---|---|---|
+| `probe_fixed_key` (key compiled in) | 4 | **1,029,454** | 1,039,706 | 68.6% | **PASS** |
+| `probe_pubkey_input` (key as input) | 6 | **1,090,965** | **1,101,216** | 72.7% | **PASS** |
+| `deposit` | 3 | **998,574** | 1,008,826 | 66.6% | **PASS** |
+| `bet` | 4 | **1,029,454** | 1,039,706 | 68.6% | **PASS** |
+| `redeem` | 4 | **1,029,454** | 1,039,706 | 68.6% | **PASS** |
 
 [MEASURED] Identical on mainnet (143) and testnet (10143) — the gas schedule does
-not differ between them. Both figures are the *warm* per-call cost; the verifier
-was confirmed to **return `true`** before gas was recorded, so these are
-acceptance-path costs, not rejection-path costs.
+not differ between them. Each verifier was confirmed to **return `true`** before gas
+was recorded, so these are acceptance-path costs, not rejection-path costs. A Groth16
+verifier returns `false` for a bad proof without reverting, so measuring a rejected
+proof yields a plausible number that means nothing.
+
+Verify cost depends only on the public-signal count, not circuit size: `bet` has 14,194
+constraints against `probe_fixed_key`'s 6,834 and costs exactly the same to verify.
+That is the property that makes the uniform action envelope achievable at all.
+
+**The cold column matters and was previously unrecorded.** `ActionGasPolicy.sol` anchors
+the envelope on **1,101,216**, citing this section — but only the warm 1,090,965 was
+ever written down here. The cold figure is the one a declared transaction limit has to
+cover, because the first touch of the verifier in a transaction pays Monad's ~10,100
+cold-account charge. `tools/measure_verifier.py` emits it as
+`verify_gas_cold_first_call`; it is now in the table.
 
 ### [CONTRADICTS] the reference's 15–25% production padding
 
@@ -94,9 +120,28 @@ diverged, every proof would fail while the gas numbers still looked fine.
 [MEASURED] under `forge test --network monad`, whose pricing is validated against
 the live chain for both precompiles and cold SLOAD (§3).
 
-**Unbatched insertion does not fit:** 1,107,646 + 1,029,454 verify = **2,137,100 —
-106% of the envelope.** Confirms the reference's "sequencer always batches" rule
-with a hard number.
+### [CORRECTION] "Unbatched insertion" was two different numbers
+
+An earlier revision of this section quoted **1,107,646** in the text and **691,282**
+in the table above for the same thing, reaching opposite conclusions (106% of the
+envelope versus 86%). A third figure, **750,300**, appears in
+`circuits/build/poseidon-gas.json` and in a comment in `IncrementalMerkleTree.sol`.
+
+All three are real. They are three different quantities:
+
+| Figure | What it actually is | Label |
+|---|---|---|
+| **1,107,646** | `insert()` on a fresh tree — the `_insertBatch` path, paying all 20 frontier slots cold | [MEASURED] |
+| **691,282** | `insertSubtree([leaf])` — the grafting path at k=0, warm | [MEASURED] |
+| **750,300** | `20 × 28,980 + 20 × 8,100` arithmetic, never executed | [DERIVED] |
+
+Both measured figures reproduce exactly, and both are now asserted in
+`IncrementalMerkleTree.t.sol` rather than printed, so neither can drift again.
+
+**The conclusion is unchanged and holds on the higher figure:** a user action that
+inserts its own commitment costs 1,107,646 + 1,029,454 verify = **2,137,100, 106% of
+the envelope.** It does not fit. This is what forces the sequencer to batch, and it is
+why `ShieldedPool` only queues a commitment and grafts separately.
 
 Grafting a bottom-up subtree gives a **15.9x** reduction over the naive
 per-leaf loop (38,034 vs 604,315 per leaf at N=64), because hash count drops from
@@ -157,6 +202,152 @@ raising the envelope later is publicly observable, so it should only be set once
 
 ---
 
+## 1c. Phase 1 — the actions, measured end to end [MEASURED]
+
+Everything above measures components. This measures the real thing: a full
+`deposit → bet → redeem` lifecycle through `ShieldedPool`, with real Groth16 proofs
+generated by `circuits/scripts/gen_action_fixtures.mjs` running through the real
+snarkjs-generated verifiers.
+
+Reproduce: `make circuits && make fixtures && make verifiers && make test`
+
+| Action | Gas | % of 2,000,000 envelope |
+|---|---|---|
+| `deposit` | **1,378,641** | 69% |
+| `bet` | **1,165,715** | 58% |
+| `redeem` | **1,137,382** | 57% |
+| Sequencer `flushBatch(64)` | **2,791,576** (43,618/leaf) | separate tx, 9% of the 30M tx limit |
+
+`deposit` is the most expensive despite having the *cheapest* verifier (998,574, three
+public signals) because it also moves ERC20 collateral and calls `Vault.split`. Verify
+cost is not the dominant term once an action does real work.
+
+**Nothing here is mocked.** Earlier phases could measure a verifier in isolation; these
+numbers only mean something if the proofs actually verify against the deployed
+verifiers, the packing layout agrees between circom and Solidity, and the contract's
+Merkle root equals the one the prover built its path against. That last one is asserted
+directly in `test_contractRootMatchesProverRoot`.
+
+### [MEASURED] Real testnet transactions — and local is optimistic by 30–60%
+
+Deployed to Monad testnet (chain 10143) on 30 July 2026 and exercised end to end.
+Deployment and exercise receipts are in `contracts/broadcast/`.
+
+| Contract | Address |
+|---|---|
+| `ShieldedPool` | `0x2E6603e2c5B3DeDD4910bd38D41B740675a2Af32` |
+| `IncrementalMerkleTree` | `0xd4ae7009f8B60685DEAA1a827670ce5F6Cc8c441` |
+| `ParimutuelPool` | `0xD184083A3BF95D52de74143edBe74dc80B745501` |
+| `MappingNullifierSet` | `0x13EEad89A13358e7e3F2e106Fa1b24d0eA3A8Dc7` |
+| `Vault` | `0xd42dbe0b1373B0FBBb78E01a9489362187858a7f` |
+| `PoseidonT3` | `0x05A74dc13A6E4B2E166393558357485bD76bBf3c` |
+| `DepositVerifier` / `BetVerifier` / `RedeemVerifier` | `0x55d098…39F3` / `0x9cE77A…f175` / `0xc1d8ef…fF03` |
+
+**The on-chain root after grafting equalled the root the prover built its Merkle path
+against**, exactly:
+`15091044500897788679743006247934363757548094238705679309755141770701367595051`.
+Three independent implementations of the same hashing rules — circom, Solidity and the
+sequencer's TypeScript mirror — agree on a live chain.
+
+| Action | `forge --network monad` | **Live testnet** | Δ | % of 2,000,000 envelope |
+|---|---|---|---|---|
+| `deposit` | 1,378,641 | **1,816,031** | +32% | **91%** |
+| `bet` | 1,165,715 | **1,633,573** | +40% | **82%** |
+| `queuePadding(63)` | — | 2,567,903 | — | sequencer tx |
+| `flushBatch(64)` | 2,791,576 | **4,439,006** | +59% | sequencer tx |
+
+**[CONTRADICTS] our own §1b figures, and it matters.** Local pricing is validated
+against the live chain for precompiles and cold SLOAD, but §3 already flagged that
+local cold *account* access is wrong (~18,000 local versus 10,252 live) and warned
+that "local numbers for cross-contract call overhead should not be trusted without
+checking". This is that warning, quantified. A `deposit` crosses five contracts — pool,
+verifier, collateral, vault, and vault-to-collateral again — plus intrinsic cost and
+~400 bytes of proof calldata that `forge` does not charge at all.
+
+**Consequence for the envelope, and it reverses a pending decision.** §1b and
+`HANDOFF.md` §7.1 both proposed tightening the uniform envelope from 2,000,000 to
+~1,400,000 on the grounds that actions were running at ~55%. On real transactions
+`deposit` is **1,816,031 — 91% of 2,000,000**. Tightening to 1.4M would have made every
+deposit revert.
+
+**The envelope stays at 2,000,000, and the remaining headroom is ~184,000 gas, not
+~900,000.** Phase 2's ElGamal accumulator has to fit inside that. Raising the envelope
+later is publicly observable and shrinks the anonymity set of everything submitted
+before it, so if the accumulator does not fit, the answer is to optimise the action —
+most obviously by moving `Vault.split` out of `deposit` — rather than to move the
+envelope.
+
+**Measure on-chain before setting any privacy-critical constant.** The local number
+would have been wrong by 437,390 gas in the direction that breaks things.
+
+Not yet exercised on testnet: `redeem`. `Vault.MIN_RESOLUTION_GAP` enforces at least an
+hour between betting close and resolution — deliberately, so a last-second bet cannot
+front-run an already determined outcome — and there is no way to skip that on a live
+chain. It is covered locally by `test_fullLifecycle_depositBetResolveRedeem`, and its
+verifier is measured in §1.
+
+### [DECIDED] Nullifiers — mapping, and not only on gas
+
+`atrum-build-plan.md` §7 specifies an indexed nullifier tree. Both were built behind
+`INullifierSet` and measured inside a real action:
+
+| Strategy | Spend gas | Action total | % envelope |
+|---|---|---|---|
+| `MappingNullifierSet` | **29,107** | 1,058,561 | 52% |
+| `TreeNullifierSet` | **632,196** | 1,661,650 | 83% |
+
+The 603,089 gas gap is the smaller half of the finding. The larger half:
+**a Merkle accumulator cannot answer `isSpent` at all.** It proves membership;
+rejecting a double-spend requires proving *non*-membership, which a root cannot
+witness. `test_treeSilentlyAcceptsTheSameNullifierTwice` demonstrates the resulting
+double-spend rather than asserting it in prose.
+
+A true indexed Merkle tree solves this with sorted low-leaf links and an **in-circuit**
+non-membership proof — a larger circuit and a bigger proving key, on top of the
+603,089 gas. It earns that only if some circuit needs in-circuit non-membership for
+another reason. Nothing in Phase 1 or Phase 2 does.
+
+**Decision: mapping.** `TreeNullifierSet` is kept rather than deleted, because
+`ShieldedPool`'s constructor refuses any set whose `enforcesOnChain()` is false — and
+keeping the loser makes that guard something a test can exercise instead of a comment.
+Accepted tradeoff: unbounded state growth, one slot per nullifier forever. Revisit only
+if state rent appears on Monad.
+
+### [MEASURED] Public inputs, confirmed a third time
+
+| Verifier | Public signals | Verify gas |
+|---|---|---|
+| `deposit` | 3 | 998,574 |
+| `bet` / `redeem` | 4 | 1,029,454 |
+| `probe_pubkey_input` | 6 | 1,090,965 |
+
+3→4 costs 30,880; 4→6 costs 61,511 (30,756 each). Consistent across five independently
+generated verifiers, which is why `bet` and `redeem` pack marketId, outcome, units and
+recipient into single field elements rather than spending a signal on each.
+
+### [MEASURED] Anti-fingerprinting guard now covers actions
+
+`make uniformity` previously checked only the two Phase 0 probes. It now covers all
+five verifiers:
+
+```
+ok   PubKeyInputVerifier       1,101,216   headroom    898,784
+ok   FixedKeyVerifier          1,039,706   headroom    960,294
+ok   BetVerifier               1,039,706   headroom    960,294
+ok   RedeemVerifier            1,039,706   headroom    960,294
+ok   DepositVerifier           1,008,826   headroom    991,174
+worst measured action  1,101,216      utilisation 55.1%      actions/block 75
+PASSED -- all actions fit one uniform declared gas limit
+```
+
+The rule is about the **declared** limit, not gas used. The three actions genuinely
+cost different amounts (1,378,641 / 1,165,715 / 1,137,382); they must all be submitted
+declaring 2,000,000, because Monad charges the declared limit and that field is public.
+A snug per-action limit would identify which private action a user took while the proof
+stayed sealed.
+
+---
+
 ## 2. Chain parameters [MEASURED]
 
 Monad mainnet, chain 143, at block 91,560,339:
@@ -193,14 +384,28 @@ up in a measurement.
 
 ### Pairings — the central asymmetry, confirmed
 
-| | Ours | Reference | |
-|---|---|---|---|
-| `ecPairing` 0x08 (BN254) | **225,000 + 170,000k** | same | ok |
-| `bls12_pairing` 0x0f | **37,700 + 32,600k** | same | ok |
+| | Ours | Reference | Label | |
+|---|---|---|---|---|
+| `ecPairing` 0x08 (BN254) | **225,000 + 170,000k** | same | [MEASURED] | ok |
+| `bls12_pairing` 0x0f, slope | **32,600** | same | [MEASURED] | ok |
+| `bls12_pairing` 0x0f, base | **37,700** | same | **[DERIVED]** | see below |
 
-[MEASURED] Linear fit **exact** across k=0..5 — five identical deltas, no residual.
-BN254 pairing is repriced ~5x while EIP-2537 BLS12-381 is untouched. **The single
-fact the whole architecture rests on reproduces perfectly.**
+BN254: [MEASURED], linear fit **exact** across k=0..5 — six points, five identical
+deltas, no residual. BN254 pairing is repriced ~5x while EIP-2537 BLS12-381 is
+untouched. **The single fact the whole architecture rests on reproduces perfectly.**
+
+### [CORRECTION] the BLS12-381 base is derived, not measured
+
+An earlier revision labelled both pairing rows [MEASURED] "exact across k=0..5". For
+BLS12-381 that is not true: the k=0 probe fails, returning
+
+> `inner call consumed all forwarded gas -- it reverted; input is invalid for this target`
+
+An empty input is not a valid `bls12_pairing` call, so only k=1..5 are measured — four
+deltas, all exactly 32,600. The base of 37,700 is extrapolated from the fit
+(70,300 − 32,600), which agrees with the reference but is [DERIVED], not observed. It
+is also not load-bearing: nothing in Atrum calls `bls12_pairing`, since moving the
+verifier to BLS12-381 would break the BabyJubJub field alignment the circuits depend on.
 
 ### [CONTRADICTS] modexp
 
@@ -314,11 +519,16 @@ constraint** — the reference's conclusion holds on our own measurements.
 - The committee key in `circuits/build/committee-key.json` is a **test key** with a
   known secret. Phase 2 ships a single disclosed key by design; Phase 3 replaces it
   with 3-of-5 threshold decryption.
+- The Phase 1 zkeys carry the same **single phase-2 contribution** problem, and
+  `bet`/`redeem` additionally use `powersOfTau28_hez_final_14.ptau`, whose transcript
+  is unverified for the same reason as power 13.
 - Not yet measured: `ElGamalAccumulator` storage costs (the reference's ~68,000/bet
-  single and ~2,375/bet batched figures). That is Phase 2 work and is the next
-  number to nail down, because it is what makes batching mandatory.
-- Not yet measured: end-to-end transaction gas including calldata and the nullifier
-  tree. The gate covers verify only.
+  single and ~2,375/bet batched figures). Phase 2 work, and the last number needed
+  before the envelope can be finalised.
+- ~~Not yet measured: end-to-end transaction gas.~~ **Now measured — see §1c.**
+- Not yet measured: real testnet transaction gas including calldata and intrinsic
+  cost. Everything in §1c is `forge --network monad`, whose pricing is validated
+  against the live chain but which does not charge calldata or the 21,000 intrinsic.
 
 ---
 
@@ -330,4 +540,15 @@ production padding does not materialise. The curve choice (BN254 + BabyJubJub) i
 confirmed as the right one, the 5x BN254 repricing is real and priced in, and the
 homomorphic mechanism is demonstrated working rather than assumed.
 
-Nothing measured here argues for reassessing the architecture. Proceed to Phase 1.
+**Phase 1 is built and fits.** All three actions verify real proofs and land between
+57% and 69% of the envelope, with the worst declared cost at 55.1%. The commitment
+tree, the nullifier decision and the batching requirement are each settled by a
+measurement rather than by the plan's estimate — and in two cases the measurement
+overturned the plan (mapping over indexed tree; padding does not exist).
+
+What is **not** settled: redemption is still public, which per `atrum-build-plan.md`
+makes the privacy claim false rather than degraded. Until Phase 2 moves it inside the
+pool, the honest description is *anonymous-participant parimutuel market*, not
+*private prediction market*.
+
+Nothing measured here argues for reassessing the architecture. Proceed to Phase 2.

@@ -79,8 +79,7 @@ contract StorageRepricingTest is Test {
             surcharge,
             ETHEREUM_COLD_SLOAD * 2,
             "local EVM appears to use ETHEREUM cold SLOAD pricing -- tree gas "
-            "measured locally will understate Monad by ~6,000 per level; "
-            "use tools/monad_gas.py instead"
+            "measured locally will understate Monad by ~6,000 per level; " "use tools/monad_gas.py instead"
         );
     }
 

@@ -53,9 +53,15 @@ keygen: ## Generate a BabyJubJub committee keypair (TEST USE ONLY)
 prove: ## Generate proofs and verify the ElGamal mechanism end to end
 	cd circuits && node scripts/prove.mjs
 
+.PHONY: fixtures
+fixtures: ## Real deposit/bet/redeem proofs for the Solidity suite to replay
+	cd circuits && node scripts/gen_action_fixtures.mjs
+
 .PHONY: verifiers
 verifiers: ## Copy generated verifiers into contracts/src/verifiers and build
-	@for pair in "probe_fixed_key:FixedKeyVerifier" "probe_pubkey_input:PubKeyInputVerifier"; do \
+	@mkdir -p contracts/src/verifiers
+	@for pair in "probe_fixed_key:FixedKeyVerifier" "probe_pubkey_input:PubKeyInputVerifier" \
+	             "deposit:DepositVerifier" "bet:BetVerifier" "redeem:RedeemVerifier"; do \
 		src="$${pair%%:*}"; name="$${pair##*:}"; \
 		sed "s/contract Groth16Verifier/contract $$name/" \
 			"circuits/build/$${src}_verifier.sol" > "contracts/src/verifiers/$${name}.sol"; \
@@ -75,8 +81,19 @@ measure: ## Chain params + precompile costs (NETWORK=testnet|mainnet)
 gate: ## PHASE 0 GATE: real Groth16 verify gas vs the 1.5M stop-line
 	python3 tools/measure_verifier.py --network $(NETWORK)
 
+.PHONY: poseidon
+poseidon: ## PHASE 1 GATE (part 1): on-chain Poseidon cost, live chain
+	python3 tools/measure_poseidon.py --network $(NETWORK)
+
+.PHONY: uniformity
+uniformity: ## CI ANTI-FINGERPRINTING GUARD: every action fits ONE declared gas limit
+	@mkdir -p circuits/build
+	python3 tools/measure_verifier.py --network $(NETWORK) \
+		--json circuits/build/gate-$(NETWORK).json
+	python3 tools/check_gas_uniformity.py circuits/build/gate-$(NETWORK).json
+
 .PHONY: verify-all
-verify-all: test prove gate ## Everything that can fail: contracts, mechanism, gate
+verify-all: prove fixtures test gate uniformity ## Everything that can fail, in dependency order
 
 # ---------------------------------------------------------------------------
 

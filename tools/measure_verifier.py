@@ -41,8 +41,16 @@ REFERENCE_CORE = {4: 1_031_828, 6: None, 8: 1_157_678}
 
 VARIANTS = [
     # (contract name, circuit name, public signal count)
+    #
+    # The two Phase 0 probes measure the ElGamal gate. The three Phase 1 actions are
+    # here because the anti-fingerprinting rule is about ACTIONS: every shielded action
+    # must fit one uniform declared gas limit, so a new action that does not fit has to
+    # fail the guard rather than quietly ship with a snug limit that identifies it.
     ("FixedKeyVerifier", "probe_fixed_key", 4),
     ("PubKeyInputVerifier", "probe_pubkey_input", 6),
+    ("DepositVerifier", "deposit", 3),
+    ("BetVerifier", "bet", 4),
+    ("RedeemVerifier", "redeem", 4),
 ]
 
 
