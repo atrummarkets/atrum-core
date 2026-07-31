@@ -11,10 +11,12 @@ import {IncrementalMerkleTree, IPoseidonT3} from "../src/IncrementalMerkleTree.s
 import {MappingNullifierSet} from "../src/MappingNullifierSet.sol";
 import {ParimutuelPool} from "../src/ParimutuelPool.sol";
 import {ActionGasPolicy} from "../src/ActionGasPolicy.sol";
-import {ShieldedPool, IDepositVerifier, IActionVerifier} from "../src/ShieldedPool.sol";
+import {ShieldedPool, IDepositVerifier, IActionVerifier, IActionVerifier8} from "../src/ShieldedPool.sol";
+import {ElGamalAccumulator} from "../src/ElGamalAccumulator.sol";
 import {DepositVerifier} from "../src/verifiers/DepositVerifier.sol";
 import {BetVerifier} from "../src/verifiers/BetVerifier.sol";
 import {RedeemVerifier} from "../src/verifiers/RedeemVerifier.sol";
+import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
 
 /// @notice PHASE 1 END TO END, with REAL proofs.
 ///
@@ -33,9 +35,11 @@ contract ShieldedPoolTest is Test {
 
     MockERC20 usdc;
     Vault vault;
+    Vault encryptedVault;
     IncrementalMerkleTree tree;
     MappingNullifierSet nullifiers;
     ParimutuelPool parimutuel;
+    ElGamalAccumulator accumulator;
     ShieldedPool pool;
     IPoseidonT3 poseidon;
 
@@ -48,6 +52,11 @@ contract ShieldedPoolTest is Test {
     address constant FIXTURE_RECIPIENT = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
 
     uint32 constant MARKET_ID = 7;
+
+    /// @dev Phase 2 market. Separate from MARKET_ID because a market's pool total lives
+    ///      either in `parimutuel` or in `accumulator`, never both.
+    uint32 constant ENCRYPTED_MARKET_ID = 8;
+
     uint256 constant DENOM = 1e6;
     uint256 constant UNITS = 100;
 
@@ -76,30 +85,36 @@ contract ShieldedPoolTest is Test {
         resolutionStart = bettingClose + 2 hours;
 
         vault = new Vault(IERC20(address(usdc)), DENOM, resolver, keccak256("spec"), bettingClose, resolutionStart);
+        encryptedVault =
+            new Vault(IERC20(address(usdc)), DENOM, resolver, keccak256("spec-enc"), bettingClose, resolutionStart);
 
         // Deploy the verifiers first so they do not consume nonces between the
         // prediction and the pool's own CREATE.
         DepositVerifier depositVerifier = new DepositVerifier();
         BetVerifier betVerifier = new BetVerifier();
         RedeemVerifier redeemVerifier = new RedeemVerifier();
+        BetEncryptedVerifier betEncryptedVerifier = new BetEncryptedVerifier();
 
         // The pool's address is needed by three contracts it in turn depends on, so it
         // is predicted rather than wired after the fact. Predicting keeps every one of
         // those roles immutable -- a post-hoc setter on the tree's sequencer would be a
         // standing privilege over the anonymity set.
-        address predictedPool = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 3);
+        address predictedPool = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 4);
 
         tree = new IncrementalMerkleTree(poseidon, ZERO_VALUE, predictedPool);
         parimutuel = new ParimutuelPool(predictedPool);
         nullifiers = new MappingNullifierSet();
+        accumulator = new ElGamalAccumulator(predictedPool);
 
         pool = new ShieldedPool(
             tree,
             nullifiers,
             parimutuel,
+            accumulator,
             IDepositVerifier(address(depositVerifier)),
             IActionVerifier(address(betVerifier)),
             IActionVerifier(address(redeemVerifier)),
+            IActionVerifier8(address(betEncryptedVerifier)),
             sequencer,
             admin
         );
@@ -108,6 +123,7 @@ contract ShieldedPoolTest is Test {
 
         nullifiers.bindPool(address(pool));
         pool.registerMarket(MARKET_ID, vault);
+        pool.registerEncryptedMarket(ENCRYPTED_MARKET_ID, encryptedVault);
 
         usdc.mint(depositor, 1_000_000 * DENOM);
         vm.prank(depositor);
@@ -532,5 +548,223 @@ contract ShieldedPoolTest is Test {
         console.log("per leaf :", used / 64);
 
         assertLt(used, 30_000_000, "batch exceeds the transaction gas limit");
+    }
+
+    // -----------------------------------------------------------------------
+    // PHASE 2 -- encrypted pool total
+    // -----------------------------------------------------------------------
+
+    /// @dev Walk the tree forward to where the encrypted deposit's Merkle path was built.
+    ///      Batches graft sequentially, so batch 3 cannot be reached without 1 and 2.
+    function _reachEncryptedDeposit() internal {
+        _doDeposit();
+        _flush(".batch1Real");
+
+        pool.bet(
+            _pA("bet"),
+            _pB("bet"),
+            _pC("bet"),
+            _u(".bet.root"),
+            _u(".bet.nullifierHash"),
+            _u(".bet.newCommitment"),
+            _u(".bet.betData")
+        );
+        _flush(".batch2Real");
+
+        vm.prank(depositor);
+        pool.deposit(
+            _pA("depositEncrypted"),
+            _pB("depositEncrypted"),
+            _pC("depositEncrypted"),
+            _u(".depositEncrypted.commitment"),
+            ENCRYPTED_MARKET_ID,
+            UNITS
+        );
+        _flush(".batch3Real");
+
+        assertEq(tree.root(), _u(".rootAfterBatch3"), "root disagrees with the JS mirror at batch 3");
+    }
+
+    function _ciphertext() internal view returns (uint256[4] memory) {
+        return [
+            _u(".betEncrypted.ciphertext[0]"),
+            _u(".betEncrypted.ciphertext[1]"),
+            _u(".betEncrypted.ciphertext[2]"),
+            _u(".betEncrypted.ciphertext[3]")
+        ];
+    }
+
+    function _doBetEncrypted() internal {
+        pool.betEncrypted(
+            _pA("betEncrypted"),
+            _pB("betEncrypted"),
+            _pC("betEncrypted"),
+            _u(".betEncrypted.root"),
+            _u(".betEncrypted.nullifierHash"),
+            _u(".betEncrypted.newCommitment"),
+            _u(".betEncrypted.betMeta"),
+            _ciphertext()
+        );
+    }
+
+    /// @notice The Phase 2 milestone, with a real proof: a stake enters the pool without
+    ///         the contract ever seeing its value.
+    function test_betEncrypted_accumulatesWithoutRevealingStake() public {
+        _reachEncryptedDeposit();
+
+        (uint256 c1xBefore, uint256 c1yBefore,,) = accumulator.totalAffine(ENCRYPTED_MARKET_ID, 1);
+        assertEq(c1xBefore, 0, "accumulator should start at the identity");
+        assertEq(c1yBefore, 1, "identity is (0,1), not all-zeros");
+
+        _doBetEncrypted();
+
+        assertTrue(nullifiers.isSpent(_u(".betEncrypted.nullifierHash")), "nullifier not burned");
+
+        (uint256 c1x, uint256 c1y, uint256 c2x, uint256 c2y) = accumulator.totalAffine(ENCRYPTED_MARKET_ID, 1);
+        assertEq(c1x, _u(".betEncrypted.ciphertext[0]"), "accumulated C1.x is not the published ciphertext");
+        assertEq(c1y, _u(".betEncrypted.ciphertext[1]"), "accumulated C1.y is not the published ciphertext");
+        assertEq(c2x, _u(".betEncrypted.ciphertext[2]"), "accumulated C2.x is not the published ciphertext");
+        assertEq(c2y, _u(".betEncrypted.ciphertext[3]"), "accumulated C2.y is not the published ciphertext");
+
+        // The point of the whole phase: the plaintext pool total never moved, because
+        // the contract was never told one.
+        assertEq(parimutuel.totalUnits(ENCRYPTED_MARKET_ID), 0, "an encrypted bet must not touch the public pool");
+
+        assertEq(pool.queuedCount(), 4, "position commitment not queued");
+    }
+
+    function test_betEncrypted_rejectsReplay() public {
+        _reachEncryptedDeposit();
+        _doBetEncrypted();
+
+        vm.expectRevert(ShieldedPool.NullifierAlreadySpent.selector);
+        _doBetEncrypted();
+    }
+
+    /// @notice The guard that stops a market having two disagreeing pool totals.
+    function test_betEncrypted_refusesPlaintextMarket() public {
+        _reachEncryptedDeposit();
+
+        // betMeta for market 7, which is registered on the Phase 1 path.
+        uint256 plaintextMeta = uint256(MARKET_ID) * 4 + 1;
+
+        vm.expectRevert(ShieldedPool.WrongActionForMarket.selector);
+        pool.betEncrypted(
+            _pA("betEncrypted"),
+            _pB("betEncrypted"),
+            _pC("betEncrypted"),
+            _u(".betEncrypted.root"),
+            _u(".betEncrypted.nullifierHash"),
+            _u(".betEncrypted.newCommitment"),
+            plaintextMeta,
+            _ciphertext()
+        );
+    }
+
+    /// @notice The mirror guard: a plaintext bet must not stake into an encrypted market,
+    ///         which would build a public total the real odds do not derive from.
+    function test_bet_refusesEncryptedMarket() public {
+        _doDeposit();
+        _flush(".batch1Real");
+
+        // betData packing: marketId * 2^66 + outcome * 2^64 + units.
+        uint256 encMarketBetData = (uint256(ENCRYPTED_MARKET_ID) << 66) | (uint256(1) << 64) | UNITS;
+
+        vm.expectRevert(ShieldedPool.WrongActionForMarket.selector);
+        pool.bet(
+            _pA("bet"),
+            _pB("bet"),
+            _pC("bet"),
+            _u(".bet.root"),
+            _u(".bet.nullifierHash"),
+            _u(".bet.newCommitment"),
+            encMarketBetData
+        );
+    }
+
+    /// @notice A tampered ciphertext must not verify. The consistency constraint binds
+    ///         Enc(units) to the stake inside the spent note, so altering one field
+    ///         element breaks the proof rather than quietly accumulating a different
+    ///         amount -- which is the attack that would otherwise inflate a position.
+    function test_betEncrypted_rejectsTamperedCiphertext() public {
+        _reachEncryptedDeposit();
+
+        uint256[4] memory tampered = _ciphertext();
+        tampered[2] = tampered[2] + 1;
+
+        vm.expectRevert(ShieldedPool.InvalidProof.selector);
+        pool.betEncrypted(
+            _pA("betEncrypted"),
+            _pB("betEncrypted"),
+            _pC("betEncrypted"),
+            _u(".betEncrypted.root"),
+            _u(".betEncrypted.nullifierHash"),
+            _u(".betEncrypted.newCommitment"),
+            _u(".betEncrypted.betMeta"),
+            tampered
+        );
+    }
+
+    /// @notice Registering an encrypted market must initialise the accumulator in the
+    ///         same transaction. An uninitialised slot reads (0,0,0,0), which is not a
+    ///         curve point, so the first bet would revert -- a state worth making
+    ///         unreachable rather than merely guarded.
+    function test_registerEncryptedMarket_initialisesAccumulator() public {
+        assertTrue(accumulator.initialised(ENCRYPTED_MARKET_ID, 1), "YES side not initialised");
+        assertTrue(accumulator.initialised(ENCRYPTED_MARKET_ID, 2), "NO side not initialised");
+        assertTrue(pool.encryptedMarket(ENCRYPTED_MARKET_ID), "market not flagged encrypted");
+        assertFalse(pool.encryptedMarket(MARKET_ID), "plaintext market wrongly flagged");
+    }
+
+    /// @notice Phase 2 retires the plaintext path for NEW markets, without disturbing
+    ///         markets already registered.
+    function test_freezeLegacyMarkets_blocksNewPlaintextMarketsOnly() public {
+        pool.freezeLegacyMarkets();
+        assertTrue(pool.legacyMarketsFrozen(), "freeze flag not set");
+
+        vm.expectRevert(ShieldedPool.LegacyMarketsAreFrozen.selector);
+        pool.registerMarket(99, vault);
+
+        // Encrypted registration still works, and the existing plaintext market is
+        // untouched -- freezing retires the path for new markets, it does not break
+        // markets that are already live.
+        pool.registerEncryptedMarket(100, encryptedVault);
+        assertEq(address(pool.marketVault(MARKET_ID)), address(vault), "existing market disturbed");
+    }
+
+    /// @notice Real measured cost of the wired encrypted bet, against the uniform
+    ///         envelope every shielded action is declared with.
+    ///
+    /// @dev Local `forge` UNDERSTATES this. It charges neither calldata nor the intrinsic
+    ///      cost nor true cross-contract cold access, and measured Phase 1 actions came in
+    ///      30-40% higher on a real testnet transaction than they do here (MEASUREMENTS.md
+    ///      §1c). This asserts the local figure only; the envelope question is not closed
+    ///      until this action is broadcast for real.
+    function test_report_betEncryptedGas() public {
+        _reachEncryptedDeposit();
+
+        // Hoist every fixture read OUT of the measured region, exactly as the Phase 1
+        // gate tests do. `_pA`/`_u` run `vm.parseJson` cheatcodes costing ~1M gas of
+        // harness overhead; measured inline they are reported as protocol cost and the
+        // gate fails on an artefact of the test harness rather than on the contract.
+        uint256[2] memory pA = _pA("betEncrypted");
+        uint256[2][2] memory pB = _pB("betEncrypted");
+        uint256[2] memory pC = _pC("betEncrypted");
+        uint256 root = _u(".betEncrypted.root");
+        uint256 nh = _u(".betEncrypted.nullifierHash");
+        uint256 newCommitment = _u(".betEncrypted.newCommitment");
+        uint256 betMeta = _u(".betEncrypted.betMeta");
+        uint256[4] memory ciphertext = _ciphertext();
+
+        uint256 before = gasleft();
+        pool.betEncrypted(pA, pB, pC, root, nh, newCommitment, betMeta, ciphertext);
+        uint256 used = before - gasleft();
+
+        console.log("=== REAL betEncrypted(), end to end ===");
+        console.log("gas used   :", used);
+        console.log("envelope   :", ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT);
+        console.log("utilisation:", used * 100 / ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT);
+
+        assertLt(used, ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT, "encrypted bet exceeds the uniform envelope locally");
     }
 }

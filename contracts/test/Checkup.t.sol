@@ -8,10 +8,12 @@ import {Vault} from "../src/Vault.sol";
 import {IncrementalMerkleTree, IPoseidonT3} from "../src/IncrementalMerkleTree.sol";
 import {MappingNullifierSet} from "../src/MappingNullifierSet.sol";
 import {ParimutuelPool} from "../src/ParimutuelPool.sol";
-import {ShieldedPool, IDepositVerifier, IActionVerifier} from "../src/ShieldedPool.sol";
+import {ShieldedPool, IDepositVerifier, IActionVerifier, IActionVerifier8} from "../src/ShieldedPool.sol";
+import {ElGamalAccumulator} from "../src/ElGamalAccumulator.sol";
 import {DepositVerifier} from "../src/verifiers/DepositVerifier.sol";
 import {BetVerifier} from "../src/verifiers/BetVerifier.sol";
 import {RedeemVerifier} from "../src/verifiers/RedeemVerifier.sol";
+import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
 
 /// @dev Minimal 6-decimal USDC stand-in, so the checkup needs no live token.
 contract CheckupUSDC {
@@ -78,6 +80,7 @@ contract CheckupTest is Test {
     IncrementalMerkleTree tree;
     MappingNullifierSet nullifiers;
     ParimutuelPool parimutuel;
+    ElGamalAccumulator accumulator;
     ShieldedPool pool;
     IPoseidonT3 poseidon;
 
@@ -192,19 +195,23 @@ contract CheckupTest is Test {
         DepositVerifier dv = new DepositVerifier();
         BetVerifier bv = new BetVerifier();
         RedeemVerifier rv = new RedeemVerifier();
+        BetEncryptedVerifier bev = new BetEncryptedVerifier();
 
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 3);
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 4);
         tree = new IncrementalMerkleTree(poseidon, ZERO_VALUE, predicted);
         nullifiers = new MappingNullifierSet();
+        accumulator = new ElGamalAccumulator(predicted);
         parimutuel = new ParimutuelPool(predicted);
 
         pool = new ShieldedPool(
             tree,
             nullifiers,
             parimutuel,
+            accumulator,
             IDepositVerifier(address(dv)),
             IActionVerifier(address(bv)),
             IActionVerifier(address(rv)),
+            IActionVerifier8(address(bev)),
             sequencer,
             address(this)
         );

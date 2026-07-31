@@ -51,6 +51,11 @@ VARIANTS = [
     ("DepositVerifier", "deposit", 3),
     ("BetVerifier", "bet", 4),
     ("RedeemVerifier", "redeem", 4),
+    # Phase 2. The ciphertext is four field elements the contract has to ADD to the
+    # accumulator, so unlike every other action's payload it cannot be packed or hashed
+    # away -- 8 public signals is the real floor, not a design slip. Until this line
+    # existed the 8-signal cost was an extrapolation from REFERENCE_CORE, never measured.
+    ("BetEncryptedVerifier", "bet_encrypted", 8),
 ]
 
 

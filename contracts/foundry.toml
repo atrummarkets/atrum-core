@@ -42,6 +42,22 @@ runs = 5000
 monad_testnet = "https://testnet-rpc.monad.xyz"
 monad_mainnet = "https://rpc.monad.xyz"
 
+# Source verification. Monad testnet has no Etherscan-style API (`etherscanAPI: false`
+# in Sourcify's own chain list), so verification goes through Sourcify:
+#
+#   forge verify-contract <addr> src/Foo.sol:Foo \
+#     --verifier sourcify \
+#     --verifier-url https://sourcify-api-monad.blockvision.org \
+#     --chain 10143
+#
+# No API key needed. Sourcify matches the compiler metadata hash, so `solc`,
+# `optimizer_runs` and `evm_version` above must be exactly what was deployed -- which is
+# why they are pinned rather than left to profile defaults.
+#
+# `PoseidonT3` cannot be verified by any of this and never will be: it is raw EVM
+# assembly emitted by circomlibjs (`circuits/scripts/gen_poseidon.mjs`) and deployed
+# from a bytecode blob, so there is no Solidity source to match. Its correctness is
+# established differently -- `Deploy.s.sol` asserts the deployed contract's
+# Poseidon(1,2) equals circomlibjs's own answer before continuing, and
+# `test_etchedPoseidonMatchesCircomlibjs` checks the same digest locally.
 [etherscan]
-# Monad testnet verification via Sourcify/monadexplorer -- filled in when we
-# actually deploy.

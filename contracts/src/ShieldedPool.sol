@@ -6,6 +6,7 @@ import {Vault} from "./Vault.sol";
 import {IncrementalMerkleTree} from "./IncrementalMerkleTree.sol";
 import {INullifierSet} from "./INullifierSet.sol";
 import {ParimutuelPool} from "./ParimutuelPool.sol";
+import {ElGamalAccumulator} from "./ElGamalAccumulator.sol";
 
 interface IDepositVerifier {
     function verifyProof(
@@ -22,6 +23,29 @@ interface IActionVerifier {
         uint256[2][2] calldata pB,
         uint256[2] calldata pC,
         uint256[4] calldata pubSignals
+    ) external view returns (bool);
+}
+
+/// @notice Phase 2's encrypted bet. Eight public signals, not four.
+///
+/// @dev The signature is a separate interface rather than a widened `IActionVerifier`
+///      because snarkjs sizes the generated verifier's `pubSignals` array to the
+///      circuit's exact public-signal count -- `uint256[8]` and `uint256[4]` are
+///      different types, not a generic one.
+///
+///      Eight is not a slipped budget. `atrum-build-plan.md` caps circuits at 4 public
+///      signals because each costs a measured 30,776 gas, and every other action packs
+///      its fields to obey that. The ciphertext cannot be packed: it is four field
+///      elements the contract has to ADD to the accumulator, so it needs the actual
+///      values. Hashing them and passing the points as calldata would save 3 signals
+///      (~92,000) and cost 3 on-chain Poseidon calls (~87,000) -- a wash, for materially
+///      more moving parts. Measured cost of the four extra signals: 123,105 gas.
+interface IActionVerifier8 {
+    function verifyProof(
+        uint256[2] calldata pA,
+        uint256[2][2] calldata pB,
+        uint256[2] calldata pC,
+        uint256[8] calldata pubSignals
     ) external view returns (bool);
 }
 
@@ -103,9 +127,13 @@ contract ShieldedPool {
     INullifierSet public immutable nullifiers;
     ParimutuelPool public immutable parimutuel;
 
+    /// @notice Phase 2's encrypted pool total. Holds ciphertext only and cannot decrypt.
+    ElGamalAccumulator public immutable accumulator;
+
     IDepositVerifier public immutable depositVerifier;
     IActionVerifier public immutable betVerifier;
     IActionVerifier public immutable redeemVerifier;
+    IActionVerifier8 public immutable betEncryptedVerifier;
 
     /// @notice Allowed to call `flushBatch`. Trusted for liveness and ordering only --
     ///         it can stall the queue, but `flushBatch` checks the leaves so it cannot
@@ -119,6 +147,32 @@ contract ShieldedPool {
     ///         market's participants.
     mapping(uint32 => Vault) public marketVault;
 
+    /// @notice Markets whose pool total lives in the accumulator, not in `parimutuel`.
+    ///
+    /// @dev A market cannot have both. `ParimutuelPool` keeps plaintext running totals and
+    ///      `ElGamalAccumulator` keeps ciphertext ones, and the published odds have to
+    ///      derive from exactly one of them -- two sources of truth for the same market
+    ///      is a settlement bug waiting to happen, not a redundancy. So the mode is fixed
+    ///      once at registration and each entry point refuses the other mode's markets.
+    ///
+    ///      Without this, Phase 1's `bet()` would happily call `parimutuel.addStake` on a
+    ///      market whose real odds are encrypted, silently building a second, wrong total
+    ///      that nothing reconciles.
+    mapping(uint32 => bool) public encryptedMarket;
+
+    /// @notice Once set, no new plaintext market can be registered.
+    ///
+    /// @dev Phase 2 retires the plaintext path for NEW markets. Existing markets keep
+    ///      working -- flipping this does not touch them, and `bet`/`redeem` stay in the
+    ///      contract for them and for the regression suite that replays their proofs.
+    ///
+    ///      It is a switch rather than a deletion because "shielded positions, public
+    ///      pool" is a real, honestly-describable configuration that should stay
+    ///      available until the encrypted path has been exercised on a live network. It
+    ///      is on-chain rather than a policy note so that retiring the path is an
+    ///      auditable act instead of a convention someone forgets.
+    bool public legacyMarketsFrozen;
+
     uint256[] public pendingCommitments;
     uint256 public insertedCount;
 
@@ -127,6 +181,8 @@ contract ShieldedPool {
     // -----------------------------------------------------------------------
 
     event MarketRegistered(uint32 indexed marketId, address vault);
+    event EncryptedMarketRegistered(uint32 indexed marketId, address vault);
+    event LegacyMarketsFrozen();
     event CommitmentQueued(uint256 indexed commitment, uint256 queueIndex);
     event BatchInserted(uint256 startIndex, uint256 count, uint256 newRoot);
     event Spent(uint256 indexed nullifierHash);
@@ -152,6 +208,8 @@ contract ShieldedPool {
     error TransferFailed();
     error NullifierSetCannotEnforce();
     error InvalidRecipient();
+    error WrongActionForMarket();
+    error LegacyMarketsAreFrozen();
 
     modifier onlySequencer() {
         if (msg.sender != sequencer) revert NotSequencer();
@@ -162,9 +220,11 @@ contract ShieldedPool {
         IncrementalMerkleTree tree_,
         INullifierSet nullifiers_,
         ParimutuelPool parimutuel_,
+        ElGamalAccumulator accumulator_,
         IDepositVerifier depositVerifier_,
         IActionVerifier betVerifier_,
         IActionVerifier redeemVerifier_,
+        IActionVerifier8 betEncryptedVerifier_,
         address sequencer_,
         address admin_
     ) {
@@ -176,18 +236,52 @@ contract ShieldedPool {
         tree = tree_;
         nullifiers = nullifiers_;
         parimutuel = parimutuel_;
+        accumulator = accumulator_;
         depositVerifier = depositVerifier_;
         betVerifier = betVerifier_;
         redeemVerifier = redeemVerifier_;
+        betEncryptedVerifier = betEncryptedVerifier_;
         sequencer = sequencer_;
         admin = admin_;
     }
 
+    /// @notice Register a Phase 1 market: shielded positions over a PUBLIC pool total.
+    /// @dev Refused once `freezeLegacyMarkets` has been called.
     function registerMarket(uint32 marketId, Vault vault) external {
         if (msg.sender != admin) revert NotAdmin();
+        if (legacyMarketsFrozen) revert LegacyMarketsAreFrozen();
         if (address(marketVault[marketId]) != address(0)) revert MarketAlreadyRegistered();
         marketVault[marketId] = vault;
         emit MarketRegistered(marketId, address(vault));
+    }
+
+    /// @notice Register a Phase 2 market: shielded positions over an ENCRYPTED pool total.
+    ///
+    /// @dev Initialises the accumulator for both outcomes here rather than leaving it to
+    ///      a separate call. An uninitialised accumulator slot reads as `(0,0,0,0)`, which
+    ///      is not a curve point -- the identity is `(0,1)` -- so the first `betEncrypted`
+    ///      against a forgotten market would revert with `NotInitialised`. Doing it in the
+    ///      same transaction as registration makes that state unreachable rather than
+    ///      merely guarded.
+    function registerEncryptedMarket(uint32 marketId, Vault vault) external {
+        if (msg.sender != admin) revert NotAdmin();
+        if (address(marketVault[marketId]) != address(0)) revert MarketAlreadyRegistered();
+
+        marketVault[marketId] = vault;
+        encryptedMarket[marketId] = true;
+
+        accumulator.initMarket(marketId, OUTCOME_YES);
+        accumulator.initMarket(marketId, OUTCOME_NO);
+
+        emit EncryptedMarketRegistered(marketId, address(vault));
+    }
+
+    /// @notice Retire the plaintext market path for all future registrations.
+    /// @dev One-way. Existing markets are untouched and keep using `bet`/`redeem`.
+    function freezeLegacyMarkets() external {
+        if (msg.sender != admin) revert NotAdmin();
+        legacyMarketsFrozen = true;
+        emit LegacyMarketsFrozen();
     }
 
     // -----------------------------------------------------------------------
@@ -256,6 +350,9 @@ contract ShieldedPool {
 
         Vault vault = marketVault[marketId];
         if (address(vault) == address(0)) revert MarketNotRegistered();
+        // An encrypted market's total lives in the accumulator. Staking into
+        // `parimutuel` here would build a second, wrong total that nothing reconciles.
+        if (encryptedMarket[marketId]) revert WrongActionForMarket();
         if (block.timestamp >= vault.bettingCloseTime()) revert BettingClosed();
 
         // Accept any root in the history window. Without it, every batch insertion
@@ -272,6 +369,110 @@ contract ShieldedPool {
         emit Spent(nullifierHash);
 
         parimutuel.addStake(marketId, outcome, units);
+        _queue(newCommitment);
+    }
+
+    // -----------------------------------------------------------------------
+    // BET, PHASE 2 -- the stake goes dark
+    // -----------------------------------------------------------------------
+
+    /// @notice Spend an unbet note and commit the same stake to a side, encrypted.
+    ///
+    /// @dev The difference from `bet` is one signal: `units` is gone. The contract is
+    ///      handed a ciphertext instead and adds it to a running encrypted total, so the
+    ///      pool total is hidden from everyone including the operator until the committee
+    ///      decrypts a ratio. That is what fixes parimutuel's real weakness -- a visible
+    ///      running total gives late bettors a free read on everyone else's information.
+    ///
+    ///      EVERY SOLIDITY GUARD ON A VALUE DIES WHEN THAT VALUE GOES PRIVATE.
+    ///
+    ///      This is the Phase 2 failure mode worth internalising: the contract still
+    ///      compiles, the tests still pass, and the check is simply gone. An audit of all
+    ///      ten guards in `bet` found exactly two whose input no longer exists here:
+    ///
+    ///        - `units == 0`      -> moved into the circuit (`bet_encrypted.circom` §8).
+    ///        - `addStake(units)` -> replaced by the ciphertext accumulator below.
+    ///
+    ///      The other eight operate on values that are still public and are kept verbatim.
+    ///      A third gap was found the same way and is guarded in BOTH places: an
+    ///      `encRandomness` of 0 makes `C1` the identity and `C2 = [units]G`, publishing
+    ///      the stake to anyone who cares to take a discrete log. The circuit constrains
+    ///      it and `ElGamalAccumulator` rejects it again, because the failure is silent --
+    ///      a degenerate ciphertext accumulates perfectly well.
+    ///
+    ///      Split verify-from-settle for the same reason `redeem` is: the non-IR codegen
+    ///      runs out of stack otherwise, and turning on `via_ir` would change every gas
+    ///      figure in MEASUREMENTS.md, which are the point of this repo.
+    /// @param ciphertext Enc(units) as (c1x, c1y, c2x, c2y), flat to match the accumulator.
+    function betEncrypted(
+        uint256[2] calldata pA,
+        uint256[2][2] calldata pB,
+        uint256[2] calldata pC,
+        uint256 root,
+        uint256 nullifierHash,
+        uint256 newCommitment,
+        uint256 betMeta,
+        uint256[4] calldata ciphertext
+    ) external {
+        _checkEncryptedBet(root, nullifierHash, betMeta);
+
+        if (!betEncryptedVerifier.verifyProof(
+                pA,
+                pB,
+                pC,
+                [
+                    root,
+                    nullifierHash,
+                    newCommitment,
+                    betMeta,
+                    ciphertext[0],
+                    ciphertext[1],
+                    ciphertext[2],
+                    ciphertext[3]
+                ]
+            )) {
+            revert InvalidProof();
+        }
+
+        _settleEncryptedBet(nullifierHash, newCommitment, betMeta, ciphertext);
+    }
+
+    /// @dev Everything checkable before the proof is verified. Note there is no
+    ///      `units == 0` check and cannot be -- see the `betEncrypted` notice.
+    function _checkEncryptedBet(uint256 root, uint256 nullifierHash, uint256 betMeta) private view {
+        (uint32 marketId, uint8 outcome) = _unpackMarketMeta(betMeta);
+
+        if (outcome != OUTCOME_YES && outcome != OUTCOME_NO) revert InvalidOutcome();
+
+        Vault vault = marketVault[marketId];
+        if (address(vault) == address(0)) revert MarketNotRegistered();
+        // Refuse a plaintext market: its total lives in `parimutuel`, and accumulating
+        // here would leave that total permanently short of the encrypted stakes.
+        if (!encryptedMarket[marketId]) revert WrongActionForMarket();
+        if (block.timestamp >= vault.bettingCloseTime()) revert BettingClosed();
+
+        if (!tree.isKnownRoot(root)) revert UnknownRoot();
+        if (nullifiers.isSpent(nullifierHash)) revert NullifierAlreadySpent();
+    }
+
+    function _settleEncryptedBet(
+        uint256 nullifierHash,
+        uint256 newCommitment,
+        uint256 betMeta,
+        uint256[4] calldata ciphertext
+    ) private {
+        (uint32 marketId, uint8 outcome) = _unpackMarketMeta(betMeta);
+
+        // Burn before any external effect.
+        nullifiers.spend(nullifierHash);
+        emit Spent(nullifierHash);
+
+        // Affine, not extended: measured at 122,270 cold against extended's 185,399,
+        // and a real testnet deposit leaves only ~184,000 of envelope headroom. The
+        // extended variant exists and is still measured so the choice stays
+        // evidence-backed, but it does not fit.
+        accumulator.accumulateAffine(marketId, outcome, ciphertext[0], ciphertext[1], ciphertext[2], ciphertext[3]);
+
         _queue(newCommitment);
     }
 
