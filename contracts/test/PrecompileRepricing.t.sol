@@ -20,11 +20,7 @@ contract PrecompileRepricingTest is Test {
 
     uint256 constant ETHEREUM_ECMUL = 6_000;
 
-    function _callPrecompile(address target, bytes memory input)
-        private
-        view
-        returns (uint256 gasUsed, bool ok)
-    {
+    function _callPrecompile(address target, bytes memory input) private view returns (uint256 gasUsed, bool ok) {
         uint256 before = gasleft();
         (ok,) = target.staticcall(input);
         gasUsed = before - gasleft();

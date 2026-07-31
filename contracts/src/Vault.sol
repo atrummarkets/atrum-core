@@ -214,8 +214,7 @@ contract Vault {
         if (units == 0) revert ZeroUnits();
         if (outcome == Outcome.Unresolved) revert NotResolved();
 
-        mapping(address => uint256) storage winning =
-            outcome == Outcome.Yes ? yesBalance : noBalance;
+        mapping(address => uint256) storage winning = outcome == Outcome.Yes ? yesBalance : noBalance;
 
         if (winning[msg.sender] < units) revert InsufficientPosition();
 

@@ -30,14 +30,7 @@ contract VaultTest is Test {
         bettingClose = uint64(block.timestamp + 7 days);
         resolutionStart = bettingClose + 2 hours;
 
-        vault = new Vault(
-            IERC20(address(usdc)),
-            DENOM,
-            resolver,
-            SPEC_HASH,
-            bettingClose,
-            resolutionStart
-        );
+        vault = new Vault(IERC20(address(usdc)), DENOM, resolver, SPEC_HASH, bettingClose, resolutionStart);
 
         _fund(alice, 1_000 * DENOM);
         _fund(bob, 1_000 * DENOM);
@@ -55,14 +48,11 @@ contract VaultTest is Test {
     ///      Post-resolution only the winning side has a claim.
     function _assertSolvent() private view {
         assertEq(
-            usdc.balanceOf(address(vault)),
-            vault.collateralHeld(),
-            "accounting drifted from the actual token balance"
+            usdc.balanceOf(address(vault)), vault.collateralHeld(), "accounting drifted from the actual token balance"
         );
 
-        uint256 owed = vault.outcome() == Vault.Outcome.Unresolved
-            ? vault.yesSupply() * DENOM
-            : vault.winningSupply() * DENOM;
+        uint256 owed =
+            vault.outcome() == Vault.Outcome.Unresolved ? vault.yesSupply() * DENOM : vault.winningSupply() * DENOM;
 
         assertGe(vault.collateralHeld(), owed, "vault is insolvent");
     }
@@ -99,22 +89,13 @@ contract VaultTest is Test {
         uint64 gap = vault.MIN_RESOLUTION_GAP();
 
         vm.expectRevert(Vault.InvalidSchedule.selector);
-        new Vault(
-            IERC20(address(usdc)),
-            DENOM,
-            resolver,
-            SPEC_HASH,
-            bettingClose,
-            bettingClose + gap - 1
-        );
+        new Vault(IERC20(address(usdc)), DENOM, resolver, SPEC_HASH, bettingClose, bettingClose + gap - 1);
     }
 
     function test_constructor_acceptsExactlyMinimumGap() public {
         uint64 gap = vault.MIN_RESOLUTION_GAP();
 
-        Vault tight = new Vault(
-            IERC20(address(usdc)), DENOM, resolver, SPEC_HASH, bettingClose, bettingClose + gap
-        );
+        Vault tight = new Vault(IERC20(address(usdc)), DENOM, resolver, SPEC_HASH, bettingClose, bettingClose + gap);
         assertEq(tight.resolutionStartTime(), bettingClose + gap);
     }
 

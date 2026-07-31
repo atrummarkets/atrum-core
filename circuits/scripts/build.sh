@@ -15,24 +15,57 @@ cd "$(dirname "$0")/.."
 
 LIB=node_modules/circomlib/circuits
 BUILD=build
-PTAU="$BUILD/powersOfTau28_hez_final_13.ptau"
 
-# Real Hermez ceremony file (power 13 -> 8,192 constraints; our circuits use
-# ~6,840). Using the actual ceremony output rather than a locally generated tau
-# keeps the production path identical to the measurement path -- a self-generated
-# tau would mean whoever ran it knows the toxic waste and could forge proofs.
-if [[ ! -f "$PTAU" ]]; then
-    echo "==> fetching powers-of-tau (power 13)"
-    curl -sL -o "$PTAU" \
-        https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_13.ptau
+# Real Hermez ceremony files. Using the actual ceremony output rather than a locally
+# generated tau keeps the production path identical to the measurement path -- a
+# self-generated tau would mean whoever ran it knows the toxic waste and could forge
+# proofs.
+#
+# Power is per circuit because it is not free: a bigger tau means a bigger zkey and a
+# slower setup, and the Phase 0 probes were measured against power 13. The Phase 1
+# action circuits do not fit there -- a depth-20 Merkle path costs ~4,900 constraints
+# on its own, putting `bet` at 14,194 and `redeem` at 12,734 against power 13's ceiling
+# of 8,192. Those two need power 14 (16,384).
+fetch_ptau() {
+    local power="$1"
+    local ptau="$BUILD/powersOfTau28_hez_final_${power}.ptau"
+    if [[ ! -f "$ptau" ]]; then
+        echo "==> fetching powers-of-tau (power $power)"
+        curl -sL -o "$ptau" \
+            "https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_${power}.ptau"
+    fi
+    echo "$ptau"
+}
+
+# The committee key is gitignored (it holds a secret), but probe_fixed_key bakes the
+# PUBLIC half in at compile time. Generate the key if absent, then derive the circom
+# constants from it -- otherwise a clean clone compiles against a stale key and every
+# ciphertext check fails looking like a circuit bug.
+if [[ ! -f "$BUILD/committee-key.json" ]]; then
+    echo "==> no committee key found, generating one (TEST KEY)"
+    node scripts/keygen.mjs
 fi
+echo "==> deriving circom committee-key constants"
+node scripts/gen_committee_key_circom.mjs
 
-CIRCUITS=(probe_pubkey_input probe_fixed_key)
+# circuit:ptau-power. Phase 0 probes stay on 13 so their measured gas is not perturbed
+# by an unrelated change; the Phase 1 action circuits take the smallest power they fit.
+CIRCUITS=(
+    probe_pubkey_input:13
+    probe_fixed_key:13
+    deposit:13
+    bet:14
+    redeem:14
+)
 
-for c in "${CIRCUITS[@]}"; do
+for entry in "${CIRCUITS[@]}"; do
+    c="${entry%%:*}"
+    power="${entry##*:}"
+    PTAU="$(fetch_ptau "$power" | tail -1)"
+
     echo
     echo "=============================================================="
-    echo "  $c"
+    echo "  $c   (ptau power $power)"
     echo "=============================================================="
 
     echo "==> compiling"
@@ -48,7 +81,7 @@ for c in "${CIRCUITS[@]}"; do
     echo "==> phase-2 contribution (single -- NOT a production ceremony)"
     npx snarkjs zkey contribute \
         "$BUILD/${c}_0000.zkey" "$BUILD/$c.zkey" \
-        --name="atrum-phase0-measurement" -v -e="$(head -c 64 /dev/urandom | base64)"
+        --name="atrum-measurement-$c" -v -e="$(head -c 64 /dev/urandom | base64)"
 
     echo "==> exporting verification key"
     npx snarkjs zkey export verificationkey \
