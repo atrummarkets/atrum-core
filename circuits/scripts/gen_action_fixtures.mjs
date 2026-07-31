@@ -513,6 +513,110 @@ async function main() {
   };
 
   // -------------------------------------------------------------------------
+  // 6b. PRIVATE REDEEM: turn a winning position into a SETTLED note, paying nobody.
+  //
+  //     This is the item both build plans refuse to cut. `redeem.circom` publishes a
+  //     recipient address and an amount; `redeem_private.circom` publishes neither and emits
+  //     a note instead, so exiting to USDC becomes a separate, later, unlinkable action.
+  //
+  //     The note redeemed here is the position `betEncrypted` created, so this fixture only
+  //     works against a tree that actually contains it -- batch 5 below grafts both position
+  //     notes, and the contract's root must match `rpRootAfterBatch`.
+  // -------------------------------------------------------------------------
+  // ONLY the second position note. The first was already grafted in batch 4 alongside the
+  // second encrypted deposit -- re-listing it here asks the contract to graft a leaf that is
+  // no longer queued, which is exactly what `NotEnoughQueued` was reporting.
+  const rpBatch = [encPositionCommitment2];
+  while (rpBatch.length < BATCH_SIZE) {
+    rpBatch.push(derivedFiller(4 * BATCH_SIZE, rpBatch.length));
+  }
+  for (const leaf of rpBatch) tree.insert(leaf);
+
+  const rpRootAfterBatch = tree.root();
+  fixtures.batch5 = rpBatch.map((x) => x.toString());
+  fixtures.batch5Real = [encPositionCommitment2.toString()];
+  fixtures.rootAfterBatch5 = rpRootAfterBatch.toString();
+
+  // The position note being redeemed is the FIRST leaf of batch 4 (index 3 * BATCH_SIZE),
+  // not batch 5 -- `betEncrypted` queued it before the second encrypted deposit, so batch 4
+  // grafted both together. Its Merkle path is taken after batch 5 so the proof is built
+  // against `rpRootAfterBatch`, a root the contract will actually hold.
+  const rpPositionPath = tree.path(3 * BATCH_SIZE);
+
+  // Settled totals: both bets went on YES, nothing on NO. So YES wins and takes the whole
+  // pool, and the payout for a position of UNITS is `UNITS * total / winning`.
+  const rpSettledYes = UNITS + SECOND_UNITS;
+  const rpSettledNo = 0n;
+  const rpTotalPool = rpSettledYes + rpSettledNo;
+  const rpWinningPool = rpSettledYes;
+
+  const rpDividend = UNITS * rpTotalPool;
+  const rpPayout = rpDividend / rpWinningPool;
+  const rpRemainder = rpDividend % rpWinningPool;
+
+  assert(
+    rpPayout * rpWinningPool + rpRemainder === rpDividend,
+    "redeem division does not reconstruct its rpDividend",
+  );
+  assert(rpRemainder < rpWinningPool, "redeem remainder is not less than the divisor");
+
+  const RP_SETTLED = 3n;
+
+  const rpSettledNote = {
+    nullifier: randomField(),
+    secret: randomField(),
+    marketId: ENCRYPTED_MARKET_ID,
+    outcome: RP_SETTLED,
+    units: rpPayout,
+  };
+  const rpSettledCommitment = noteCommitment(rpSettledNote);
+  const rpNullifierHash = nullifierHash(encPositionNote.nullifier);
+
+  // rpRedeemMeta = marketId * 2^130 + outcome * 2^128 + rpTotalPool * 2^64 + rpWinningPool
+  const rpRedeemMeta =
+    ENCRYPTED_MARKET_ID * (1n << 130n) +
+    OUTCOME_YES * (1n << 128n) +
+    rpTotalPool * (1n << 64n) +
+    rpWinningPool;
+
+  const rpProof = await prove("redeem_private", {
+    root: rpRootAfterBatch,
+    nullifierHash: rpNullifierHash,
+    newCommitment: rpSettledCommitment,
+    // Explicit keys, not shorthand: these must be the CIRCUIT's signal names, which are
+    // independent of whatever the JS variables are called.
+    redeemMeta: rpRedeemMeta,
+    nullifier: encPositionNote.nullifier,
+    secret: encPositionNote.secret,
+    newNullifier: rpSettledNote.nullifier,
+    newSecret: rpSettledNote.secret,
+    marketId: ENCRYPTED_MARKET_ID,
+    outcome: OUTCOME_YES,
+    units: UNITS,
+    totalPool: rpTotalPool,
+    winningPool: rpWinningPool,
+    payout: rpPayout,
+    remainder: rpRemainder,
+    pathElements: rpPositionPath.pathElements,
+    pathIndices: rpPositionPath.pathIndices,
+  });
+
+  fixtures.redeemPrivate = {
+    ...rpProof,
+    root: rpRootAfterBatch.toString(),
+    nullifierHash: rpNullifierHash.toString(),
+    newCommitment: rpSettledCommitment.toString(),
+    redeemMeta: rpRedeemMeta.toString(),
+    // Everything below is for the test's assertions, NOT sent on-chain -- units and the
+    // payout are private, which is the whole point of this circuit.
+    privateUnits: UNITS.toString(),
+    privatePayout: rpPayout.toString(),
+    settledYesTotal: rpSettledYes.toString(),
+    settledNoTotal: rpSettledNo.toString(),
+    settledOutcome: RP_SETTLED.toString(),
+  };
+
+  // -------------------------------------------------------------------------
   // 7. Negative fixture: a bet proof for a note that was never deposited.
   //    The contract must reject it, and the only thing standing in the way is the
   //    Merkle constraint -- worth having a real counterexample rather than trusting it.

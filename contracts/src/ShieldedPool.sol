@@ -40,6 +40,15 @@ interface IActionVerifier {
 ///      values. Hashing them and passing the points as calldata would save 3 signals
 ///      (~92,000) and cost 3 on-chain Poseidon calls (~87,000) -- a wash, for materially
 ///      more moving parts. Measured cost of the four extra signals: 123,105 gas.
+/// @notice Minimal read surface of `EncryptedParimutuelPool`, for private redemption.
+/// @dev A one-directional interface rather than an import: `EncryptedParimutuelPool` already
+///      takes `ShieldedPool` in its constructor, so importing it here would be circular.
+interface IEncryptedTotals {
+    function settled(uint32 marketId) external view returns (bool);
+    function finalYesTotal(uint32 marketId) external view returns (uint256);
+    function finalNoTotal(uint32 marketId) external view returns (uint256);
+}
+
 interface IActionVerifier8 {
     function verifyProof(
         uint256[2] calldata pA,
@@ -135,6 +144,18 @@ contract ShieldedPool {
     IActionVerifier public immutable redeemVerifier;
     IActionVerifier8 public immutable betEncryptedVerifier;
 
+    /// @notice Verifier for `redeemPrivate`. Four public signals: root, nullifierHash,
+    ///         newCommitment, redeemMeta.
+    IActionVerifier public redeemPrivateVerifier;
+
+    /// @notice Where settled pool totals are read from, for private redemption.
+    /// @dev Bound once, after construction, because the dependency is circular:
+    ///      `EncryptedParimutuelPool` needs this pool's address to be constructed. Binding is
+    ///      irreversible, so the privileged window is exactly one call and there is no
+    ///      standing authority over settlement afterwards -- the same shape as
+    ///      `MappingNullifierSet.bindPool`.
+    IEncryptedTotals public encryptedTotals;
+
     /// @notice Allowed to call `flushBatch`. Trusted for liveness and ordering only --
     ///         it can stall the queue, but `flushBatch` checks the leaves so it cannot
     ///         forge one, and it never learns which note a bet spent.
@@ -208,6 +229,10 @@ contract ShieldedPool {
     error TransferFailed();
     error NullifierSetCannotEnforce();
     error InvalidRecipient();
+    error NotSettled2();
+    error AlreadyBound();
+    error TotalsMismatch();
+    error LosingOrSettledPosition();
     error WrongActionForMarket();
     error LegacyMarketsAreFrozen();
 
@@ -535,6 +560,114 @@ contract ShieldedPool {
         }
 
         emit Redeemed(recipient, marketId, owed);
+    }
+
+    // -----------------------------------------------------------------------
+    // PRIVATE REDEEM -- the item both build plans refuse to cut
+    // -----------------------------------------------------------------------
+
+    /// @notice Bind the settlement source and the private-redeem verifier. Once, by admin.
+    /// @dev Two-step rather than constructor injection because `EncryptedParimutuelPool`
+    ///      needs this contract's address to exist first. Irreversible: after this call
+    ///      nobody, including the admin, can repoint where payouts are computed from.
+    function bindEncryptedTotals(IEncryptedTotals totals, IActionVerifier verifier) external {
+        if (msg.sender != admin) revert NotAdmin();
+        if (address(encryptedTotals) != address(0)) revert AlreadyBound();
+        if (address(totals) == address(0) || address(verifier) == address(0)) revert InvalidRecipient();
+        encryptedTotals = totals;
+        redeemPrivateVerifier = verifier;
+    }
+
+    /// @notice Redeem a position into a NEW SHIELDED NOTE. Nothing is paid out here.
+    ///
+    /// @dev THIS IS WHY IT EXISTS. `redeem` above publishes a recipient address and an
+    ///      amount. `atrum-build-plan.md` is blunt that a public payout claim "retroactively
+    ///      reveals every position", making the privacy claim FALSE rather than weak, and
+    ///      names it the one item never to cut. `atrum-4day-plan.md` §7 repeats it. So the
+    ///      payout becomes a note; leaving for public USDC is a separate, later, unlinkable
+    ///      action.
+    ///
+    ///      No collateral moves in this function. That is the point, not an omission.
+    ///
+    ///      WHAT THE CONTRACT CAN AND CANNOT CHECK
+    ///
+    ///      It cannot see the position size or the payout -- both are private, which is what
+    ///      Phase 1 leaked. So the payout arithmetic is proved in-circuit against divisors
+    ///      the contract CAN see, and this function's whole job is to confirm those divisors
+    ///      are the real settled totals rather than numbers the prover chose. Everything
+    ///      else -- that the note exists, that the payout is the correct quotient, that the
+    ///      new note is tagged SETTLED -- is the circuit's.
+    ///
+    ///      `redeemMeta` packs marketId, outcome, totalPool, winningPool. It is unpacked and
+    ///      each total compared against `encryptedTotals`; a mismatch means the prover
+    ///      invented a pool size, which would inflate every payout pro rata.
+    function redeemPrivate(
+        uint256[2] calldata pA,
+        uint256[2][2] calldata pB,
+        uint256[2] calldata pC,
+        uint256 root,
+        uint256 nullifierHash,
+        uint256 newCommitment,
+        uint256 redeemMeta
+    ) external {
+        if (!tree.isKnownRoot(root)) revert UnknownRoot();
+        if (nullifiers.isSpent(nullifierHash)) revert NullifierAlreadySpent();
+
+        _checkRedeemMeta(redeemMeta);
+
+        if (!redeemPrivateVerifier.verifyProof(pA, pB, pC, [root, nullifierHash, newCommitment, redeemMeta])) {
+            revert InvalidProof();
+        }
+
+        // Burn before any external effect. The payout note is queued, not inserted -- the
+        // sequencer grafts it, same as every other action.
+        nullifiers.spend(nullifierHash);
+        emit Spent(nullifierHash);
+
+        _queue(newCommitment);
+    }
+
+    /// @dev Confirm the divisors the proof was built against are the real settled totals.
+    function _checkRedeemMeta(uint256 redeemMeta) private view {
+        (uint32 marketId, uint8 outcome, uint256 totalPool, uint256 winningPool) = _unpackRedeemMeta(redeemMeta);
+
+        Vault vault = marketVault[marketId];
+        if (address(vault) == address(0)) revert MarketNotRegistered();
+        if (!encryptedMarket[marketId]) revert WrongActionForMarket();
+
+        if (address(encryptedTotals) == address(0)) revert AlreadyBound();
+        if (!encryptedTotals.settled(marketId)) revert NotSettled2();
+
+        Vault.Outcome resolved = vault.outcome();
+        if (resolved == Vault.Outcome.Unresolved) revert NotResolved();
+
+        // A losing position is worth nothing, so there is nothing to redeem. `outcome == 3`
+        // is a SETTLED payout note, which the circuit also rejects -- checked here too
+        // because the consequence of it slipping through is an unbounded mint.
+        uint8 winning = resolved == Vault.Outcome.Yes ? OUTCOME_YES : OUTCOME_NO;
+        if (outcome != OUTCOME_UNBET && outcome != winning) revert LosingOrSettledPosition();
+
+        uint256 yes = encryptedTotals.finalYesTotal(marketId);
+        uint256 no = encryptedTotals.finalNoTotal(marketId);
+
+        // The claimed divisors must be exactly the settled ones. Without this the prover
+        // picks a bigger `totalPool` or a smaller `winningPool` and the in-circuit division
+        // faithfully computes an inflated payout from invented inputs.
+        if (totalPool != yes + no) revert TotalsMismatch();
+        if (winningPool != (winning == OUTCOME_YES ? yes : no)) revert TotalsMismatch();
+    }
+
+    /// @dev redeemMeta = marketId * 2^130 + outcome * 2^128 + totalPool * 2^64 + winningPool
+    ///      Must match `redeem_private.circom` exactly.
+    function _unpackRedeemMeta(uint256 redeemMeta)
+        internal
+        pure
+        returns (uint32 marketId, uint8 outcome, uint256 totalPool, uint256 winningPool)
+    {
+        winningPool = redeemMeta & type(uint64).max;
+        totalPool = (redeemMeta >> 64) & type(uint64).max;
+        outcome = uint8((redeemMeta >> 128) & OUTCOME_MASK);
+        marketId = uint32(redeemMeta >> 130);
     }
 
     function _owedUnits(Vault vault, uint32 marketId, uint8 outcome, uint256 units) private view returns (uint256) {

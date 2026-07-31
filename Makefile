@@ -64,13 +64,16 @@ prove: ## Generate proofs and verify the ElGamal mechanism end to end
 .PHONY: fixtures
 fixtures: ## Real deposit/bet/redeem proofs for the Solidity suite to replay
 	cd circuits && node scripts/gen_action_fixtures.mjs
+	cd circuits && node scripts/gen_settlement_fixtures.mjs
+	# Must run AFTER gen_action_fixtures: it settles the ciphertext those real bets produced.
+	cd circuits && node scripts/gen_e2e_fixtures.mjs
 
 .PHONY: verifiers
 verifiers: ## Copy generated verifiers into contracts/src/verifiers and build
 	@mkdir -p contracts/src/verifiers
 	@for pair in "probe_fixed_key:FixedKeyVerifier" "probe_pubkey_input:PubKeyInputVerifier" \
 	             "deposit:DepositVerifier" "bet:BetVerifier" "redeem:RedeemVerifier" \
-	             "bet_encrypted:BetEncryptedVerifier"; do \
+	             "bet_encrypted:BetEncryptedVerifier" "redeem_private:RedeemPrivateVerifier"; do \
 		src="$${pair%%:*}"; name="$${pair##*:}"; \
 		sed "s/contract Groth16Verifier/contract $$name/" \
 			"circuits/build/$${src}_verifier.sol" > "contracts/src/verifiers/$${name}.sol"; \

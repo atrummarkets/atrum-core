@@ -17,11 +17,11 @@ Groth16 proof.
 |---|---|---|
 | **0** — kill the risk | Vault skeleton, ElGamal circuit, real gas measurement | **complete, gate passed** |
 | **1** — market, public pools | Vault, ShieldedPool, 3 circuits, parimutuel, sequencer, CI | **complete, 1 critical fixed** |
-| **2** — encrypted pools | Accumulator, `Enc(m)` in-circuit, private redeem, publisher | **~70%** — encrypted bet + settlement wired and **exercised on testnet**; private redeem, withdraw and publisher still unbuilt |
+| **2** — encrypted pools | Accumulator, `Enc(m)` in-circuit, private redeem, publisher | **~85%** — encrypted bet, settlement and **private redemption** all wired and tested end to end; `withdraw` circuit built but its contract path is not; publisher and `cancel` unbuilt |
 | **3** — product | Frontend, resolver, seeded markets, threshold committee | not started |
 
-**145 Solidity tests + 29 circuit soundness attacks + 155 curve vectors + 13 sequencer tests**
-passing.
+**183 Solidity tests + 95 circuit soundness attacks + 155 curve vectors + 13 sequencer tests**
+passing. (Soundness: 29 on `bet_encrypted`, 34 on `redeem_private`, 32 on `withdraw`.)
 Everything numeric below is reproducible with the commands in §6.
 
 **A security review of Phase 1 found and fixed one critical vulnerability**: the
@@ -59,11 +59,90 @@ path is now wired, measured, and exercised on Monad testnet. See
 | `EncryptedParimutuelPool` + plaintext binding | yes | 15 tests, **attack reverted on testnet** | **yes** |
 | Single disclosed committee key | yes | generated circom include, cannot drift from the key file | n/a |
 | `ShieldedPool` Phase 2 path (`betEncrypted`) | yes | 8 tests, **1,904,506 gas on testnet, 95.2% of envelope** | **yes** |
-| Private redeem | **no** | — | — |
-| Withdraw circuit | **no** | — | — |
+| `cancel` | **no** | — | design in §1e (deadline-first) |
 | Publisher (cadence, BSGS, ratio) | **no** | BSGS + DLEQ now extracted to `circuits/scripts/lib/`, exercised, but no worker | — |
 
 Test count is now **168 Solidity tests** (was 145), plus 13 sequencer tests.
+
+### [VERIFIED] The encrypted path now settles end to end
+
+Phase 2's two halves were each well tested, against **different inputs**, and nothing
+joined them:
+
+- `ShieldedPool.t.sol` ran a real `betEncrypted` proof, so the accumulator received a
+  ciphertext the CIRCUIT built.
+- `EncryptedParimutuelPool.t.sol` settled ciphertexts that `gen_settlement_fixtures.mjs`
+  built directly in JavaScript.
+
+No test had shown that a ciphertext the circuit produced could actually be decrypted and
+settled on-chain — which is the entire claim Phase 2 rests on. That gap mattered
+specifically because **all three real bugs found in this repo have lived in seams**, not
+inside components: `queuePadding` (deposit and redeem each correct, neither proving a
+leaf came from a deposit), and the guard migration (`units == 0`, which vanished at the
+Solidity/circuit boundary rather than moving across it).
+
+`contracts/test/EncryptedEndToEnd.t.sol` closes it. The full real sequence — deposit,
+bet, encrypted deposit, `betEncrypted(100)`, encrypted deposit, `betEncrypted(37)`,
+resolve, settle — with every proof real and nothing mocked:
+
+```
+staked (never visible to the contract) : 137
+settled YES total                      : 137
+published YES probability              : 10000 bps
+```
+
+[MEASURED] Two stakes the contract never saw, summed on-chain by point addition, and
+recovered only at settlement under a DLEQ proof. Seven tests, including three that cover
+the ways it fails rather than the way it works:
+
+- the accumulator holds the homomorphic **sum** of both circuit-produced ciphertexts, and
+  the untouched NO side is still the identity `(0,1)` — not all-zeros
+- a lying total is rejected **against the real ciphertext**, not only a JS-built one
+- claiming the empty side holds anything reverts, and settling before betting closes reverts
+
+### [MEASURED] `betEncrypted`, closing the last UNMEASURED gap
+
+An earlier revision of this file listed the 8-public-signal verify cost as unmeasured, with
+~1,155,000 as an extrapolation. Measured:
+
+| | Gas | % of 2,000,000 envelope |
+|---|---|---|
+| `betEncrypted`, full action, local | **1,352,807** | 68% |
+
+[UNVERIFIED] The real testnet figure. Phase 1 measured local `deposit` at 1,378,641 against
+a real **1,816,031** — local underestimates by ~30% because it charges neither calldata nor
+the intrinsic cost. Applying that, `betEncrypted` lands near **1.8M, ~90% of envelope.**
+Tight. Measure on testnet before assuming headroom.
+
+### [FIXED] A clean `git pull` broke a third of the test suite
+
+Not anyone's code — a build-artefact provenance bug, and the same class as the three CI
+failures fixed earlier.
+
+Verification keys were **committed**; proving keys are **gitignored** and, by design, not
+reproducible. `snarkjs zkey contribute` mixes its own randomness in even when `-e` entropy
+is fixed [MEASURED], so `vk_delta_2` differs per machine while `IC` matches. The committed
+vkeys therefore only matched the machine that built them, and anyone pulling the repo got
+29 failures reading `InvalidProof()` — which looks exactly like broken contracts. CI never
+caught it because CI regenerates both halves in the same run.
+
+[CORRECTION to our own first attempt] We tried pinning the contribution entropy to make
+zkeys reproducible so the vkeys could stay committed. **It does not work, and it should
+not:** `groth16 setup` is deterministic [MEASURED] but `contribute` is not, and if the whole
+setup were derivable from public inputs the toxic waste would be public and every proof
+forgeable. That non-determinism is the security property. The pin was reverted.
+
+The actual fix: **stop committing the vkeys.** They are derived from a deliberately
+irreproducible input, so committing them was the mistake. `make circuits` regenerates them.
+
+What *is* pinned, because it works and was verified identical across runs: the **test
+committee key**, derived by counter-hashing a public seed. That is what lets key-dependent
+fixtures be valid on any machine. `ATRUM_RANDOM_KEY=1` opts out. Both pinned values are
+loudly labelled public and worthless as secrets — which they already were, since Phase 2
+ships "a single decryption key, disclosed plainly" by design.
+
+`gen_settlement_fixtures.mjs` and `gen_e2e_fixtures.mjs` are now wired into `make fixtures`
+and both CI jobs, so the new coverage cannot silently stop running.
 
 ### The correction this phase produced
 
@@ -139,6 +218,197 @@ So the proof is required as soon as the pool goes dark, even with a single key. 
 "single decryption key, disclosed plainly" is not a privacy caveat — it is unilateral
 authority over everyone's collateral. Measured cost makes this easy: **$0.05/day** for hourly
 publishing.
+
+---
+
+## 1c. Private redemption — BUILT, and the item both plans refuse to cut
+
+`ShieldedPool.redeem` published a recipient address and an amount. Both plans forbid that:
+`atrum-build-plan.md` — *"Never cut private redemption"*; `atrum-4day-plan.md` §7 —
+*"Redemption stays inside the shielded pool. Non-negotiable."* A public payout retroactively
+deanonymises every position it pays, which makes the privacy claim **false rather than weak**.
+
+`redeemPrivate` publishes neither. The payout becomes a shielded note; leaving for USDC is a
+separate, later, unlinkable action.
+
+[MEASURED] end to end, real proofs throughout — deposit, bet, encrypted deposit,
+`betEncrypted(100)`, encrypted deposit, `betEncrypted(37)`, graft, resolve, settle, redeem:
+
+```
+position units (private, never on-chain) : 100
+payout units  (private, never on-chain) : 100
+collateral moved                        : 0
+gas                                     : 1,126,328   (56% of envelope)
+```
+
+### The four-outcome scheme, and the unbounded mint it prevents
+
+The payout note needs an outcome value, and every pre-existing one is redeemable — so redeem a
+winner, receive a payout note, redeem *that*, forever. Nullifiers do not help: each payout
+note is genuinely new, and every individual step is legitimate. The 2-bit outcome field
+already had room for a fourth value, so this costs nothing:
+
+| outcome | bettable | redeemable | withdrawable |
+|---|---|---|---|
+| 0 — unbet collateral | yes | yes (1:1 refund) | **no** |
+| 1 / 2 — YES / NO position | no | if it won | **no** |
+| **3 — SETTLED payout** | no | **no** | **yes** |
+
+`redeem_private` accepts `{0,1,2}` and always emits `3`. `withdraw` pins its input to `3` as a
+circuit constant. The cycle is closed by construction rather than by a check someone could
+forget.
+
+### The payout division had to move in-circuit
+
+Phase 1's contract computed `units × total / winning` because `units` was public. It is private
+now, so the contract cannot. The settled totals ARE public, so the division is proved
+in-circuit against public divisors:
+
+```
+units × totalPool == payout × winningPool + remainder,   remainder < winningPool
+```
+
+Exact integer division, truncating DOWN, so payouts can only sum to less than the pool.
+
+**The contract's remaining job is pinning the divisors to reality**, and it is load-bearing:
+
+```solidity
+if (totalPool != yes + no) revert TotalsMismatch();
+if (winningPool != (winning == OUTCOME_YES ? yes : no)) revert TotalsMismatch();
+```
+
+Without it the circuit proves the arithmetic faithfully — about invented inputs. A prover
+claims a larger `totalPool` and walks away with a proportionally inflated payout carrying a
+perfectly valid proof. Two tests cover it (inflated total, shrunk winning pool).
+
+`ShieldedPool` reads settled totals through a one-time irreversible `bindEncryptedTotals`,
+because `EncryptedParimutuelPool` already takes `ShieldedPool` in its constructor — the
+dependency is circular. Same shape as `MappingNullifierSet.bindPool`: the privileged window is
+exactly one call, and afterwards nobody can repoint where payouts are computed from.
+
+### Verification
+
+34 circuit soundness attacks, all rejected — 4 on the mint loop, 11 on payout inflation
+(inflated payout, honest quotient with inflated note, quotient bumped with remainder forced to
+zero, `remainder == winningPool`, lying about each of `totalPool`/`winningPool`/`units`, refund
+inflated above units, division by zero, zero payout), plus packing and binding. Eight honest
+baselines are asserted ACCEPTED first, including the two awkward ones: a division **with a
+remainder**, and an unbet refund when `winningPool = 0`.
+
+Plus 8 on-chain tests: no collateral moved, one-shot, pre-settlement rejection, both divisor
+attacks, plaintext-market rejection, and bind irreversibility.
+
+---
+
+## 1d. `withdraw` — circuit built, contract path NOT built
+
+The exit: a SETTLED note becomes public USDC. **32 soundness attacks pass; there is no
+`ShieldedPool.withdraw` yet.**
+
+Stated plainly: the **amount and recipient are public and must be** — real collateral moves and
+a transfer is visible. Privacy comes from unlinkability instead: which note funded it is
+hidden, `redeemPrivate` already severed position→payout, and the timing is the holder's choice.
+
+**Partial withdrawal exists for a privacy reason, not convenience.** A settled payout is
+whatever the parimutuel arithmetic produced — 137, 1,041, an odd number — and a payout
+uniquely identifies the position that earned it. Full-note-only withdrawal would leak exactly
+what `redeemPrivate` protects. Withdrawing round, fixed denominations makes every withdrawal
+look identical; the change returns as a new SETTLED note.
+
+Conservation is the load-bearing constraint: `amount + change == units`, with both private, so
+the contract can check neither. Seven attacks cover it, including the one that matters most —
+**`amount = 2^200` with a complementary negative change**, which satisfies the sum modulo the
+field while paying out vastly more than the note holds. The range checks on both halves stop
+it.
+
+---
+
+## 1e. [CORRECTION x2] `cancel` is an adverse-selection problem, not a pricing one
+
+Two earlier claims in this file were wrong. Both are corrected here rather than deleted,
+because the wrong versions are the ones someone would naturally re-derive.
+
+### The exploit
+
+Alice bets 100 YES and 100 NO. Pools reach 1000/1000. News arrives, YES is near-certain, she
+cancels NO:
+
+| | payout | outlay | profit |
+|---|---|---|---|
+| no cancel button | 200 | 200 | **0** |
+| free cancel | 190 | 100 | **+90** |
+
+The +90 is not created. The YES multiplier drops 2.00x → 1.90x, so the other 900 YES units lose
+0.10 each: **900 × 0.10 = 90**, exactly her gain. A transfer from the bettors who stayed in.
+
+### [CORRECTION 1] Two quantities were conflated
+
+An earlier table here reported "profit as % of cancelled stake" reaching ~100% for small
+bettors, and concluded the exploit is *worst* for small players. That figure was the **gain from
+cancelling versus not cancelling**, not profit:
+
+| her stake | winning pool | share | no-cancel | cancel | gain | **total profit** |
+|---|---|---|---|---|---|---|
+| 100 | 1,000 | 10% | 0.0 | 90.0 | 90.0 | **90.0** |
+| 100 | 100,000 | 0.1% | −99.0 | 0.9 | **99.9** | **0.9** |
+| 900 | 1,000 | 90% | 800.0 | 810.0 | 10.0 | **810.0** |
+
+The 99.9 is not a small bettor getting rich — it is that *not* cancelling is catastrophic for
+them. Total profit is 0.9. `gain = c × (1 − a/Y)` is correct; calling it profit was not.
+
+### [CORRECTION 2] Free cancellation is NOT mispriced
+
+The bigger error. This was framed as a mispriced free option. It is not. [MEASURED] under
+market-implied probability:
+
+```
+uninformed canceller, EV of not cancelling : +0.00
+uninformed canceller, EV of cancelling     : +0.00
+```
+
+Refunding the stake **is** fair value — which follows directly from §5's result that a
+parimutuel position is always worth exactly its stake under market-implied odds. So the +90
+comes from nowhere in the pricing.
+
+**It comes purely from information.** Alice cancels a leg the market values at 100 and she knows
+is worth 0. The mechanism is **adverse selection**:
+
+- uninformed bettors have no reason to cancel (EV 0)
+- informed bettors always cancel (EV = +their edge)
+- the pool therefore only ever faces the informed side, and cannot win on average
+
+### What that changes about the fix
+
+- **A fee still does not work**, but for a better reason than stated before: it must exceed the
+  *informed edge*, which approaches 100% of the stake as certainty approaches 1. No fixed fee
+  prices an unbounded edge.
+- **A deadline is weaker than previously claimed here.** An earlier revision said "the deadline
+  is the fix." It is a mitigation, not a fix: information arriving *before* the deadline is
+  still exploitable. In a market where news can break at any moment, no deadline is fully safe.
+
+The honest options, none of which are parameter tweaks:
+
+1. **No cancellation.** Where the code is today. Structurally safe; costs early exit entirely.
+2. **Cancellation with a short deadline.** Knowingly writes a free option to informed traders
+   for that window. Size the window by how fast information moves in the specific market.
+3. **Refund the position's value at cancellation time** rather than its stake — which collapses
+   to (2), because those are the same number under market-implied odds, and pricing private
+   information is not possible.
+
+**Recommendation: option 1 for launch.** The plan already accepts capital lockup as parimutuel's
+irreducible cost, and hedging (betting the other side) remains an exact, non-exploitable exit.
+This is a product decision about how much adverse selection to accept, not an engineering one.
+
+### The gap this leaves today
+
+There is **no early exit at all**. `withdraw` accepts only SETTLED notes, and `redeemPrivate`
+requires the market resolved *and* settled. So:
+
+> **A depositor who deposits and never bets is locked until the market settles.**
+
+Not a soundness bug, and pre-existing (the old public `redeem` had the same `NotResolved`
+guard), but a real product problem. Mid-market exit currently means hedging, which is exact but
+locks *more* capital rather than freeing it.
 
 ---
 
@@ -266,6 +536,23 @@ most **~28 proofs**. Batch size is bounded by the transaction limit, not the blo
 ## 4. Distance to a first private prediction market
 
 ### 4.1 Engineering remaining
+
+**Immediate, in order:**
+
+1. `ShieldedPool.withdraw` — the circuit and its 32 soundness tests exist; the contract path,
+   the `RedeemPrivateVerifier`-style verifier export, and an e2e test spanning
+   bet → settle → redeem → withdraw do not. This is the last piece of the private path.
+2. `cancel` — **do not build without a product decision first.** §1e shows it is an
+   adverse-selection problem with no parameter fix: a fee cannot price an unbounded informed
+   edge, and a deadline only shrinks the window. Recommendation is to ship without it.
+3. Publisher — cadence, BSGS ratio recovery, ratio-only publication. `publishAttestedRatio`
+   exists on-chain; the off-chain worker does not.
+4. Re-measure every action **on testnet** and set the uniform envelope once. Local
+   underestimates by ~30% (Phase 1: 1,378,641 local vs 1,816,031 real), so `betEncrypted` at
+   1,352,807 local likely lands near 1.8M — ~90% of a 2,000,000 envelope.
+5. Frontend — nothing exists in `atrum-core`.
+
+
 
 **Phase 1 (build plan: weeks 1–3) — complete**
 - [x] `Vault.sol` + tests
@@ -433,3 +720,55 @@ Full labelled measurement record: [`MEASUREMENTS.md`](MEASUREMENTS.md).
    variant for that reason.
 5. **Tree depth 20** (1,048,576 leaves) — recommended and implemented. Depth is a
    direct multiplier on insertion cost.
+
+---
+
+## 8. Two coordination decisions, not engineering ones
+
+Both surfaced while reconciling `atrum-4day-plan.md` against this codebase. Neither is a
+bug; both will waste real work if left unresolved.
+
+### 8.1 The 4-day plan and this repo disagree about Phase 2
+
+`atrum-4day-plan.md` takes cut-line #3 deliberately and up front — encrypted pools are
+**cut** — and §4 rules that the site must not claim *"positions stay encrypted until
+settlement"* or *"private prediction market"*.
+
+But encrypted pools are **built and verified end to end** here (see §1b). And the plan's
+Day 1 and Day 2 deliverables — bet circuit, market registry, redeem circuit, resolution,
+lifecycle — already exist in `atrum-core`. The plan is written against a separate
+`atrum-zk-poc/` codebase (`ShieldedPoolPOC.sol`, `circuits/withdraw.circom`, `web/`) which
+is not present in this repository.
+
+Followed literally, Days 1–2 rebuild what exists, and the site under-claims what the code
+actually does. **Which repo is the product** needs deciding: two codebases with overlapping
+circuits is precisely how seam bugs arise, and every real bug here so far has been a seam.
+
+### 8.2 The one item both plans refuse to cut is still open
+
+`ShieldedPool.redeem` still pays a public address:
+
+```solidity
+vault.collateral().transfer(recipient, owed * vault.denomination())
+```
+
+`atrum-build-plan.md`: *"Never cut private redemption."*
+`atrum-4day-plan.md` §7: *"Redemption stays inside the shielded pool. Non-negotiable."*
+
+A public payout retroactively deanonymises every position it pays, which makes the privacy
+claim **false rather than weak**. So the hardest part of Phase 2 is done and the part both
+documents refuse to cut is not.
+
+Design for it, including a trap found at design time: the payout note needs a fourth
+outcome value, `3 = settled`. With `outcome = 0` (unbet) the payout note is itself
+redeemable as a 1:1 refund, producing an unbounded mint — redeem a winner, get a payout
+note, redeem *that* as unbet, repeat. Nullifiers do not stop it because each payout note is
+genuinely new. The 2-bit outcome field already has room:
+
+| outcome | bettable | redeemable | withdrawable |
+|---|---|---|---|
+| 0 — unbet collateral | yes | yes (1:1) | no |
+| 1 / 2 — YES / NO position | no | if it won | no |
+| **3 — settled payout** | **no** | **no** | **yes** |
+
+`redeem` accepts `{0,1,2}` and always emits `3`; `withdraw` accepts only `3`.

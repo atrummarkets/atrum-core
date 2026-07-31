@@ -56,6 +56,9 @@ VARIANTS = [
     # away -- 8 public signals is the real floor, not a design slip. Until this line
     # existed the 8-signal cost was an extrapolation from REFERENCE_CORE, never measured.
     ("BetEncryptedVerifier", "bet_encrypted", 8),
+    # Private redemption. Four signals: the payout and the position size are BOTH private,
+    # so the totals are packed into `redeemMeta` rather than published separately.
+    ("RedeemPrivateVerifier", "redeem_private", 4),
 ]
 
 

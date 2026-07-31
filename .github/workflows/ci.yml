@@ -59,6 +59,9 @@ jobs:
           ./scripts/build.sh
           node scripts/prove.mjs
           node scripts/gen_action_fixtures.mjs
+          node scripts/gen_settlement_fixtures.mjs
+          # AFTER gen_action_fixtures -- it settles the ciphertext those real bets produced.
+          node scripts/gen_e2e_fixtures.mjs
 
       - name: Install forge-std
         working-directory: contracts
@@ -111,6 +114,8 @@ jobs:
           npm ci
           ./scripts/build.sh
           node scripts/gen_action_fixtures.mjs
+          node scripts/gen_settlement_fixtures.mjs
+          node scripts/gen_e2e_fixtures.mjs
 
       - name: Typecheck and test
         working-directory: sequencer
@@ -159,6 +164,9 @@ jobs:
           # anything to do with gas.
           node scripts/prove.mjs
           node scripts/gen_action_fixtures.mjs
+          node scripts/gen_settlement_fixtures.mjs
+          # AFTER gen_action_fixtures -- it settles the ciphertext those real bets produced.
+          node scripts/gen_e2e_fixtures.mjs
           cd ../contracts
           forge install foundry-rs/forge-std --no-git || true
           cd ..
