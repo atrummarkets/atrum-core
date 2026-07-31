@@ -46,11 +46,39 @@ library ActionGasPolicy {
     ///      neither calldata nor the intrinsic cost nor true cross-contract cold
     ///      access. The real remaining headroom is closer to 184,000.
     ///
-    ///      The envelope stays at 2,000,000 regardless, because every change to it is
-    ///      publicly observable and shrinks the anonymity set of everything submitted
-    ///      before it. An action that does not fit gets optimised; the envelope does
-    ///      not move to accommodate it.
-    uint256 internal constant UNIFORM_ACTION_GAS_LIMIT = 2_000_000;
+    ///      SET ONCE, FROM MEASUREMENT. 2,000,000 was chosen before any action had been
+    ///      broadcast. Every user action has now been measured on real Monad testnet
+    ///      transactions -- see `deployments/monad-testnet-10143/` for the receipts:
+    ///
+    ///        betEncrypted   1,904,445   95.2% of 2,000,000
+    ///        deposit        1,815,993   90.8%
+    ///        withdraw       1,804,341   90.2%
+    ///        redeemPrivate  1,671,108   83.6%
+    ///
+    ///      At 2,000,000 the binding action had 95,555 gas of headroom -- and two
+    ///      `betEncrypted` calls in the same run measured 1,904,445 and 1,859,711, a
+    ///      44,734 spread from cold/warm variation alone. Roughly half the headroom was
+    ///      consumed by ordinary variance, before any code change.
+    ///
+    ///      That margin is not survivable, because overrunning is worse than expensive:
+    ///      the transaction reverts out of gas AND the user still pays the full declared
+    ///      limit, so they lose the fee and get nothing.
+    ///
+    ///      2,500,000 puts the binding action at 76% with 595,555 of headroom, about 13x
+    ///      the observed variance, leaving room for the threshold committee and resolver
+    ///      work without moving this number again.
+    ///
+    ///      IT COSTS USERS REAL MONEY, and that is measured too, not assumed: a
+    ///      21,000-gas transfer declared at 2,000,000 was charged for 2,114,412 gas on
+    ///      testnet. Monad bills the DECLARED limit, so raising the envelope raises the
+    ///      price of every action -- roughly 0.275 MON against 0.220 at 110 gwei. That
+    ///      is the price of the uniformity property, paid on every action including
+    ///      cheap ones.
+    ///
+    ///      DO NOT MOVE IT AGAIN. Every change is publicly observable and shrinks the
+    ///      anonymity set of everything submitted before it. An action that does not fit
+    ///      gets optimised; the envelope does not move to accommodate it.
+    uint256 internal constant UNIFORM_ACTION_GAS_LIMIT = 2_500_000;
 
     /// @notice Highest verify cost we have actually measured on Monad, for any
     ///         action. Kept here so the uniformity test has a real anchor.
@@ -68,6 +96,22 @@ library ActionGasPolicy {
     ///      four extra signals cost a measured 123,105 gas, 30,776 each. That is the
     ///      per-signal price the whole packing discipline exists to avoid paying.
     uint256 internal constant MAX_MEASURED_VERIFY_GAS = 1_162_809;
+
+    /// @notice Lowest measured ratio of REAL testnet gas to local `forge` gas, as a
+    ///         percentage. Use it to project a local figure before comparing it to the
+    ///         envelope.
+    ///
+    /// @dev Local `forge` charges neither calldata, nor the intrinsic transaction cost,
+    ///      nor true cross-contract cold access, so every local number in this repo is a
+    ///      LOWER BOUND. Measured across all four user actions on real testnet
+    ///      transactions: deposit 1.32x, betEncrypted 1.41x, redeemPrivate 1.48x,
+    ///      withdraw 1.55x.
+    ///
+    ///      The MINIMUM is kept rather than the mean or the max, deliberately. This
+    ///      constant is used to prove that something does NOT fit, so the conservative
+    ///      choice is the one that makes fitting easiest -- if a path overruns even at
+    ///      1.32x, it overruns.
+    uint256 internal constant MIN_LOCAL_TO_TESTNET_PCT = 132;
 
     /// @notice Block gas limit measured on Monad mainnet.
     /// @dev Docs claim 200,000,000; that figure is stale. Measured at 150,000,000.

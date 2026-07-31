@@ -73,52 +73,66 @@ PRESENT  redeemPrivate  0xfd338202
 PRESENT  withdraw       0x5aad4723
 ```
 
-## THE RESULT THAT MATTERS: real gas vs the 2,000,000 envelope
+## THE RESULT: every user action measured on real transactions
 
-Every shielded action must be submitted with one identical declared `gas_limit`. Monad charges
-the declared limit and it is a public field, so a per-action limit fingerprints which private
-action was taken. That only works if every action fits under a single number.
+The full private path ran end to end on testnet against pool
+`0xBE28c060b7F6Cb8C055430eA1CE75d8C577b2d21`: deposit -> betEncrypted x2 -> settle ->
+`redeemPrivate` -> `withdraw`. The on-chain root matched the prover's `rootAfterBatch6`
+exactly. Receipts in [`receipts/exercise-full-private-path.json`](receipts/exercise-full-private-path.json).
 
-Measured from the broadcast receipts — real transactions, not estimates:
-
-| action | local `forge` | **real testnet** | ratio | % of 2,000,000 |
+| action | local `forge` | **real testnet** | ratio | % of 2,500,000 |
 |---|---|---|---|---|
-| `betEncrypted` | 1,352,833 | **1,904,445** | 1.41× | **95.2%** |
-| `deposit` | 1,378,691 | **1,815,993** | 1.32× | **90.8%** |
-| `bet` (deprecated) | 1,173,922 | 1,644,342 | 1.40× | 82.2% |
-| `flushBatch` (×64 leaves) | — | 3,734,346 | — | 186.7% |
+| `betEncrypted` | 1,352,833 | **1,904,445** | 1.41x | 76.2% |
+| `deposit` | 1,378,691 | **1,815,993** | 1.32x | 72.6% |
+| `withdraw` | 1,166,565 | **1,804,341** | **1.55x** | 72.2% |
+| `redeemPrivate` | 1,126,337 | **1,671,108** | 1.48x | 66.8% |
 
-### What this says
+Not user actions, so exempt from the uniform-limit rule -- nothing about them is private:
+`publishFinalTotals` 2,854,931, `flushBatch` (64 leaves) 3,637,441.
 
-**Local measurements understate real cost by 32–41%.** They charge neither calldata, the
-intrinsic transaction cost, nor true cross-contract cold access. Every local figure in this
-repo should be read as a lower bound, and no envelope claim based on one is safe.
+### Local `forge` understates real cost by 32-55%
 
-**`betEncrypted` has 95,555 gas of headroom — 4.8%.** That is the tightest number in the
-system and it is the flagship action. Anything that adds a cold SLOAD (8,100 on Monad) or a
-cold account access (10,100) to this path eats a fifth of what remains. The envelope is
-effectively closed to new work on `betEncrypted` without an optimisation first.
+It charges neither calldata, the intrinsic transaction cost, nor true cross-contract cold
+access, and these actions cross five contracts. **Every local figure in this repo is a lower
+bound.** Projections made from local numbers were wrong in the unsafe direction: `withdraw`
+was projected at ~1,642,000 and came in at 1,804,341.
 
-**`flushBatch` is 187% of the envelope and that is fine.** It is a sequencer operation, not a
-user action, so it is not subject to the anti-fingerprinting constraint — nothing about it is
-meant to be private. It is listed because it is the largest transaction in the system and it
-does have to fit the block gas limit.
+### Monad bills the DECLARED gas limit -- measured, not assumed
 
-### NOT measured on testnet — do not treat as verified
+A 21,000-gas self-transfer declared at 2,000,000 was charged for **2,114,412 gas**
+(0.2157 MON at ~110 gwei). This is the premise the whole uniform-envelope design rests on,
+and it holds. Two consequences:
 
-`redeemPrivate` and `withdraw` were **not exercised by this run**; `ExerciseEncrypted.s.sol`
-stops after the encrypted bets. Their local figures and a projection at the worst observed
-ratio (1.41×):
+- A per-action limit would fingerprint which private action was taken, which is why every
+  action declares the same one.
+- The envelope is a direct tax on every action. Raising it costs users real money.
 
-| action | local | projected testnet | projected % |
-|---|---|---|---|
-| `withdraw` | 1,166,565 | ~1,642,000 | ~82% |
-| `redeemPrivate` | 1,126,337 | ~1,586,000 | ~79% |
+### The envelope moved once, from 2,000,000 to 2,500,000
 
-**These are projections, not measurements.** They would fit, but the same reasoning applied to
-`betEncrypted` before it was broadcast would have looked comfortable too. The envelope is not
-closed until both are broadcast — which needs the exercise script extended through settlement,
-private redemption and withdrawal.
+2,000,000 was picked before anything had been broadcast. At that value the binding action
+(`betEncrypted`, 1,904,445) had 95,555 gas of headroom -- and two `betEncrypted` calls in the
+same run measured 1,904,445 and 1,859,711, a **44,734 spread from cold/warm variation
+alone**. Roughly half the headroom was consumed by ordinary variance before any code change.
+
+That margin is not survivable, because overrunning is worse than merely expensive: the
+transaction reverts out of gas **and** the user still pays the full declared limit, so they
+lose the fee and receive nothing.
+
+At 2,500,000 the binding action sits at 76% with 595,555 of headroom, about 13x the observed
+variance. It costs users roughly 0.275 MON per action against 0.220 -- the price of the
+uniformity property, paid on every action.
+
+**It should not move again.** Every change is publicly observable and shrinks the anonymity
+set of everything submitted before it.
+
+### `betEncrypted` is structurally the binding action
+
+Local breakdown of 1,352,833: `ecpairing` 905,000 (67%), eight `ecmul` at 30,000 each for the
+eight public signals (18%), `accumulateAffine` 103,684, nullifier read+write 29,196. **85% is
+Groth16 verification**, and the pairing is irreducible -- it is Monad's 5x repricing of
+`225,000 + 170,000k` at k=4. Hashing the four ciphertext signals into one would save 90,900 in
+the verifier and cost 86,940 in Poseidon: a wash, now confirmed by measurement rather than
+asserted. There is no meaningful optimisation available without changing proof system.
 
 ## Reproducing
 
