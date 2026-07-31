@@ -51,8 +51,25 @@ async function main(): Promise<void> {
   createServer((req, res) => {
     const url = new URL(req.url ?? "/", `http://localhost:${port}`);
 
+    // Liveness. Exists because every other route answers 404 or 400 by design, so an
+    // uptime monitor pointed at this service would report it permanently DOWN -- and on a
+    // host that sleeps idle services, the monitor is what keeps it awake.
+    //
+    // Returns only values that are already public on-chain. A health endpoint is the
+    // easiest place to leak state by accident.
+    if (url.pathname === "/health") {
+      res.writeHead(200, { "content-type": "application/json" }).end(
+        JSON.stringify({
+          status: "ok",
+          leaves: sequencer.tree.size,
+          root: sequencer.tree.root().toString(),
+        }),
+      );
+      return;
+    }
+
     if (url.pathname !== "/path") {
-      res.writeHead(404).end('{"error":"only /path?commitment=0x... is served"}');
+      res.writeHead(404).end('{"error":"only /health and /path?commitment=0x... are served"}');
       return;
     }
 
