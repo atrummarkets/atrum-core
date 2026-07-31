@@ -1,0 +1,115 @@
+# Monad testnet deployment — chain 10143
+
+First live deployment of the shielded pool, with the plaintext deprecation active on chain.
+Raw signed receipts are in [`receipts/`](receipts/) (`contracts/broadcast/` is gitignored, so
+they are copied here to be preserved).
+
+- **Deployed at block** ~49,710,013
+- **Deployer / sequencer** `0x364EDC06254874e62FF4AD8fA4d9a45238cb5609`
+- **RPC** `https://testnet-rpc.monad.xyz`
+- **Cost** 1.95 MON for the deploy (18 txs, 18,606,582 gas), 5.67 MON estimated for the
+  exercise run
+
+## Addresses
+
+| contract | address |
+|---|---|
+| ShieldedPool | `0x8Ea29D5C3eed4Bc6D8E68c25065f6E30BDE74464` |
+| IncrementalMerkleTree | `0xa5cA9c7920F22E1104215C430227756dEBBb2a09` |
+| MappingNullifierSet | `0x55EC8907f937fEA942c5f98039a218708E965280` |
+| ElGamalAccumulator | `0xa899d9798c28A8F63A003e3EC30718fD05C6fF8D` |
+| EncryptedParimutuelPool | `0x3a2153c98B967578F764c5Df340dc7c5E99B8757` |
+| ParimutuelPool | `0xbaaB5e17f572CC17BA3dCa8Ebf6089908873653f` |
+| Vault (encrypted, market 8) | `0xB64571A0a598A331fB647557DAD3e0db2574ccED` |
+| Vault (plaintext, market 7) | `0x183740C24733A4150b6F9D02d0eB67A94012F005` |
+| Collateral (MockERC20) | `0x9872b13257E958c2F7E4DcCc3F96b3C70c8e050c` |
+| PoseidonT3 | `0x0F1bf92EE0C79F7Ca5C1e30E9412aD5BFF45c7C8` |
+| DepositVerifier | `0xc8f4edf869635bd8bF4F97E406AD74D3cba9DD72` |
+| BetVerifier | `0xB2E2ea1DAF29E6ae06BCBBA7f215879b8D2f0f2c` |
+| BetEncryptedVerifier | `0x16Bfdbf5317A4bf56C21D57D62b1Feb95C573e07` |
+
+## On-chain state, queried after deployment
+
+Not read from the script's own output — queried back off the chain with `cast call`:
+
+```
+legacyMarketsFrozen()   -> true       the deprecation is live
+encryptedMarket(8)      -> true
+encryptedMarket(7)      -> false
+marketVault(7)          -> 0x1837…F005
+marketVault(8)          -> 0xB645…ccED
+tree.root()             -> 11031859561826175123213751912006795617610998898616231617461612218683424010770
+```
+
+The root matches the locally computed genesis root exactly.
+
+Selector scan of the **deployed** bytecode:
+
+```
+ABSENT   redeem         0x9b146677     removed; leaked recipient + amount
+PRESENT  redeemPrivate  0xfd338202
+PRESENT  withdraw       0x5aad4723
+```
+
+## THE RESULT THAT MATTERS: real gas vs the 2,000,000 envelope
+
+Every shielded action must be submitted with one identical declared `gas_limit`. Monad charges
+the declared limit and it is a public field, so a per-action limit fingerprints which private
+action was taken. That only works if every action fits under a single number.
+
+Measured from the broadcast receipts — real transactions, not estimates:
+
+| action | local `forge` | **real testnet** | ratio | % of 2,000,000 |
+|---|---|---|---|---|
+| `betEncrypted` | 1,352,833 | **1,904,445** | 1.41× | **95.2%** |
+| `deposit` | 1,378,691 | **1,815,993** | 1.32× | **90.8%** |
+| `bet` (deprecated) | 1,173,922 | 1,644,342 | 1.40× | 82.2% |
+| `flushBatch` (×64 leaves) | — | 3,734,346 | — | 186.7% |
+
+### What this says
+
+**Local measurements understate real cost by 32–41%.** They charge neither calldata, the
+intrinsic transaction cost, nor true cross-contract cold access. Every local figure in this
+repo should be read as a lower bound, and no envelope claim based on one is safe.
+
+**`betEncrypted` has 95,555 gas of headroom — 4.8%.** That is the tightest number in the
+system and it is the flagship action. Anything that adds a cold SLOAD (8,100 on Monad) or a
+cold account access (10,100) to this path eats a fifth of what remains. The envelope is
+effectively closed to new work on `betEncrypted` without an optimisation first.
+
+**`flushBatch` is 187% of the envelope and that is fine.** It is a sequencer operation, not a
+user action, so it is not subject to the anti-fingerprinting constraint — nothing about it is
+meant to be private. It is listed because it is the largest transaction in the system and it
+does have to fit the block gas limit.
+
+### NOT measured on testnet — do not treat as verified
+
+`redeemPrivate` and `withdraw` were **not exercised by this run**; `ExerciseEncrypted.s.sol`
+stops after the encrypted bets. Their local figures and a projection at the worst observed
+ratio (1.41×):
+
+| action | local | projected testnet | projected % |
+|---|---|---|---|
+| `withdraw` | 1,166,565 | ~1,642,000 | ~82% |
+| `redeemPrivate` | 1,126,337 | ~1,586,000 | ~79% |
+
+**These are projections, not measurements.** They would fit, but the same reasoning applied to
+`betEncrypted` before it was broadcast would have looked comfortable too. The envelope is not
+closed until both are broadcast — which needs the exercise script extended through settlement,
+private redemption and withdrawal.
+
+## Reproducing
+
+```bash
+cp contracts/.env.example contracts/.env   # add a throwaway PRIVATE_KEY
+make testnet-preflight                     # checks the key is set and funded
+make testnet-deploy                        # broadcasts
+
+POOL=0x8Ea29D5C3eed4Bc6D8E68c25065f6E30BDE74464 \
+COLLATERAL=0x9872b13257E958c2F7E4DcCc3F96b3C70c8e050c \
+  forge script script/ExerciseEncrypted.s.sol \
+    --rpc-url monad_testnet --network monad --broadcast --slow
+```
+
+The exercise replays recorded fixture proofs, so it only works against a pool whose tree is at
+the genesis root. Re-running it against an already-exercised pool will fail on `UnknownRoot`.

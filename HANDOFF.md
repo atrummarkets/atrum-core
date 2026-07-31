@@ -41,6 +41,50 @@ the privacy claim **false rather than degraded** — so the honest description t
 
 ---
 
+## 1a. DEPLOYED TO MONAD TESTNET — and the envelope is nearly full
+
+Chain 10143, `ShieldedPool` at `0x8Ea29D5C3eed4Bc6D8E68c25065f6E30BDE74464`. Full record,
+addresses and raw receipts: [`deployments/monad-testnet-10143/`](deployments/monad-testnet-10143/).
+
+State queried back off the chain, not read from the script's output: `legacyMarketsFrozen()`
+is **true**, `encryptedMarket(8)` true, `encryptedMarket(7)` false, and the tree root matches
+the local genesis root exactly. A selector scan of the deployed bytecode confirms `redeem` is
+**absent** while `redeemPrivate` and `withdraw` are present — the deprecation is live.
+
+### The measurement that closes a long-open question
+
+Real transactions, from the broadcast receipts:
+
+| action | local `forge` | **real testnet** | ratio | % of 2,000,000 envelope |
+|---|---|---|---|---|
+| `betEncrypted` | 1,352,833 | **1,904,445** | 1.41× | **95.2%** |
+| `deposit` | 1,378,691 | **1,815,993** | 1.32× | **90.8%** |
+| `bet` (deprecated) | 1,173,922 | 1,644,342 | 1.40× | 82.2% |
+| `flushBatch` (64 leaves) | — | 3,734,346 | — | 186.7% (sequencer, not user-facing) |
+
+**Local measurements understate real cost by 32–41%** — no calldata, no intrinsic cost, no true
+cross-contract cold access. Every local figure in this repo is a lower bound. `test_report_betEncryptedGas`
+said in its own docstring that "the envelope question is not closed until this action is
+broadcast for real"; it now has been, and the answer is uncomfortable.
+
+**`betEncrypted` has 95,555 gas of headroom — 4.8%.** One cold SLOAD (8,100) or cold account
+access (10,100) added to that path eats a fifth of what is left. The envelope is closed to new
+work on `betEncrypted` without an optimisation first. This is the single most important
+constraint on the project now.
+
+`flushBatch` at 187% is fine — it is a sequencer operation, nothing about it is private, so it
+is not subject to the uniform-limit rule.
+
+### Still UNMEASURED on testnet
+
+`redeemPrivate` and `withdraw` were not exercised — `ExerciseEncrypted.s.sol` stops after the
+encrypted bets. Projected at the worst observed ratio they land at ~79% and ~82%, so they
+*should* fit. **That is a projection, not a measurement**, and the same reasoning would have
+made `betEncrypted` look comfortable before it was broadcast. Extending the exercise script
+through settlement → `redeemPrivate` → `withdraw` is now the top task.
+
+---
+
 ## 1b. Phase 2 — where it actually stands
 
 Three components are built and verified in isolation. **Nothing is wired together**, and the
