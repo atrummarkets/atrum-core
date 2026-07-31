@@ -141,7 +141,6 @@ contract ShieldedPool {
 
     IDepositVerifier public immutable depositVerifier;
     IActionVerifier public immutable betVerifier;
-    IActionVerifier public immutable redeemVerifier;
     IActionVerifier8 public immutable betEncryptedVerifier;
 
     /// @notice Verifier for `redeemPrivate`. Four public signals: root, nullifierHash,
@@ -258,7 +257,6 @@ contract ShieldedPool {
         ElGamalAccumulator accumulator_,
         IDepositVerifier depositVerifier_,
         IActionVerifier betVerifier_,
-        IActionVerifier redeemVerifier_,
         IActionVerifier8 betEncryptedVerifier_,
         address sequencer_,
         address admin_
@@ -274,7 +272,6 @@ contract ShieldedPool {
         accumulator = accumulator_;
         depositVerifier = depositVerifier_;
         betVerifier = betVerifier_;
-        redeemVerifier = redeemVerifier_;
         betEncryptedVerifier = betEncryptedVerifier_;
         sequencer = sequencer_;
         admin = admin_;

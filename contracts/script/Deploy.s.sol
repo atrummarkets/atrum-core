@@ -12,7 +12,6 @@ import {ElGamalAccumulator} from "../src/ElGamalAccumulator.sol";
 import {EncryptedParimutuelPool} from "../src/EncryptedParimutuelPool.sol";
 import {DepositVerifier} from "../src/verifiers/DepositVerifier.sol";
 import {BetVerifier} from "../src/verifiers/BetVerifier.sol";
-import {RedeemVerifier} from "../src/verifiers/RedeemVerifier.sol";
 import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
 import {MockERC20} from "../test/mocks/MockERC20.sol";
 
@@ -62,7 +61,6 @@ contract Deploy is Script {
         address encryptedVault;
         address depositVerifier;
         address betVerifier;
-        address redeemVerifier;
         address betEncryptedVerifier;
         address tree;
         address parimutuel;
@@ -89,7 +87,6 @@ contract Deploy is Script {
 
         d.depositVerifier = address(new DepositVerifier());
         d.betVerifier = address(new BetVerifier());
-        d.redeemVerifier = address(new RedeemVerifier());
         d.betEncryptedVerifier = address(new BetEncryptedVerifier());
 
         _deployPool(d, deployer, sequencer);
@@ -142,7 +139,6 @@ contract Deploy is Script {
             ElGamalAccumulator(d.accumulator),
             IDepositVerifier(d.depositVerifier),
             IActionVerifier(d.betVerifier),
-            IActionVerifier(d.redeemVerifier),
             IActionVerifier8(d.betEncryptedVerifier),
             sequencer,
             deployer
@@ -188,7 +184,6 @@ contract Deploy is Script {
         console.log("Vault (encrypted)    :", d.encryptedVault);
         console.log("DepositVerifier      :", d.depositVerifier);
         console.log("BetVerifier          :", d.betVerifier);
-        console.log("RedeemVerifier       :", d.redeemVerifier);
         console.log("BetEncryptedVerifier :", d.betEncryptedVerifier);
         console.log("IncrementalMerkleTree:", d.tree);
         console.log("ParimutuelPool       :", d.parimutuel);

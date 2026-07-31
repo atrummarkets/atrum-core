@@ -14,7 +14,6 @@ import {ShieldedPool, IDepositVerifier, IActionVerifier, IActionVerifier8} from 
 import {ChaumPedersen} from "../src/ChaumPedersen.sol";
 import {DepositVerifier} from "../src/verifiers/DepositVerifier.sol";
 import {BetVerifier} from "../src/verifiers/BetVerifier.sol";
-import {RedeemVerifier} from "../src/verifiers/RedeemVerifier.sol";
 import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
 
 /// @notice THE SEAM TEST: settle the ciphertext a real encrypted bet actually produced.
@@ -91,7 +90,6 @@ contract EncryptedEndToEndTest is Test {
 
         DepositVerifier dv = new DepositVerifier();
         BetVerifier bv = new BetVerifier();
-        RedeemVerifier rv = new RedeemVerifier();
         BetEncryptedVerifier bev = new BetEncryptedVerifier();
 
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 4);
@@ -107,7 +105,6 @@ contract EncryptedEndToEndTest is Test {
             accumulator,
             IDepositVerifier(address(dv)),
             IActionVerifier(address(bv)),
-            IActionVerifier(address(rv)),
             IActionVerifier8(address(bev)),
             sequencer,
             address(this)

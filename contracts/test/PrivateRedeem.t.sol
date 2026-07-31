@@ -8,6 +8,7 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {IncrementalMerkleTree, IPoseidonT3} from "../src/IncrementalMerkleTree.sol";
 import {MappingNullifierSet} from "../src/MappingNullifierSet.sol";
 import {ParimutuelPool} from "../src/ParimutuelPool.sol";
+import {ActionGasPolicy} from "../src/ActionGasPolicy.sol";
 import {ElGamalAccumulator} from "../src/ElGamalAccumulator.sol";
 import {EncryptedParimutuelPool} from "../src/EncryptedParimutuelPool.sol";
 import {
@@ -20,7 +21,6 @@ import {
 import {ChaumPedersen} from "../src/ChaumPedersen.sol";
 import {DepositVerifier} from "../src/verifiers/DepositVerifier.sol";
 import {BetVerifier} from "../src/verifiers/BetVerifier.sol";
-import {RedeemVerifier} from "../src/verifiers/RedeemVerifier.sol";
 import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
 import {RedeemPrivateVerifier} from "../src/verifiers/RedeemPrivateVerifier.sol";
 import {WithdrawVerifier} from "../src/verifiers/WithdrawVerifier.sol";
@@ -99,7 +99,6 @@ contract PrivateRedeemTest is Test {
 
         DepositVerifier dv = new DepositVerifier();
         BetVerifier bv = new BetVerifier();
-        RedeemVerifier rv = new RedeemVerifier();
         BetEncryptedVerifier bev = new BetEncryptedVerifier();
         RedeemPrivateVerifier rpv = new RedeemPrivateVerifier();
         WithdrawVerifier wv = new WithdrawVerifier();
@@ -117,7 +116,6 @@ contract PrivateRedeemTest is Test {
             accumulator,
             IDepositVerifier(address(dv)),
             IActionVerifier(address(bv)),
-            IActionVerifier(address(rv)),
             IActionVerifier8(address(bev)),
             sequencer,
             address(this)
@@ -331,6 +329,14 @@ contract PrivateRedeemTest is Test {
         console.log("payout units  (private, never on-chain) :", _a(".redeemPrivate.privatePayout"));
         console.log("collateral moved                        : 0");
         console.log("gas                                     :", used);
+        console.log("envelope                                :", ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT);
+
+        // GATE. Monad charges the DECLARED gas_limit, which is a public field, so every action
+        // must declare the SAME limit or the limit itself fingerprints which action was taken.
+        // That only works if every action FITS under it. Measured and logged is not enough --
+        // a regression that pushed this over would have shown up as a larger number in a log
+        // nobody reads.
+        assertLt(used, ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT, "redeemPrivate overflows the uniform envelope");
     }
 
     /// @notice The position cannot be redeemed twice.
@@ -517,6 +523,11 @@ contract PrivateRedeemTest is Test {
         console.log("amount out (PUBLIC -- money moves)   :", amount);
         console.log("change     (private, stays a note)   :", _a(".withdraw.privateChange"));
         console.log("gas                                  :", used);
+        console.log("envelope                             :", ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT);
+
+        // GATE -- see the note on `redeemPrivate` above. `withdraw` is the most expensive
+        // action in the system, so it is the one that decides whether the envelope holds.
+        assertLt(used, ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT, "withdraw overflows the uniform envelope");
     }
 
     /// @notice The full private path, and the numbers must reconcile at every hop.
@@ -657,7 +668,6 @@ contract PrivateRedeemTest is Test {
         // contract's nonce after the prediction is computed, so the address never matches.
         DepositVerifier dv = new DepositVerifier();
         BetVerifier bv = new BetVerifier();
-        RedeemVerifier rv = new RedeemVerifier();
         BetEncryptedVerifier bev = new BetEncryptedVerifier();
 
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 4);
@@ -673,7 +683,6 @@ contract PrivateRedeemTest is Test {
             ac,
             IDepositVerifier(address(dv)),
             IActionVerifier(address(bv)),
-            IActionVerifier(address(rv)),
             IActionVerifier8(address(bev)),
             sequencer,
             address(this)

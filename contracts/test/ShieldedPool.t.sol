@@ -15,7 +15,6 @@ import {ShieldedPool, IDepositVerifier, IActionVerifier, IActionVerifier8} from 
 import {ElGamalAccumulator} from "../src/ElGamalAccumulator.sol";
 import {DepositVerifier} from "../src/verifiers/DepositVerifier.sol";
 import {BetVerifier} from "../src/verifiers/BetVerifier.sol";
-import {RedeemVerifier} from "../src/verifiers/RedeemVerifier.sol";
 import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
 
 /// @notice PHASE 1 END TO END, with REAL proofs.
@@ -98,7 +97,6 @@ contract ShieldedPoolTest is Test {
         // prediction and the pool's own CREATE.
         DepositVerifier depositVerifier = new DepositVerifier();
         BetVerifier betVerifier = new BetVerifier();
-        RedeemVerifier redeemVerifier = new RedeemVerifier();
         BetEncryptedVerifier betEncryptedVerifier = new BetEncryptedVerifier();
 
         // The pool's address is needed by three contracts it in turn depends on, so it
@@ -119,7 +117,6 @@ contract ShieldedPoolTest is Test {
             accumulator,
             IDepositVerifier(address(depositVerifier)),
             IActionVerifier(address(betVerifier)),
-            IActionVerifier(address(redeemVerifier)),
             IActionVerifier8(address(betEncryptedVerifier)),
             sequencer,
             admin
@@ -364,6 +361,36 @@ contract ShieldedPoolTest is Test {
     // -----------------------------------------------------------------------
     // The gate: a real bet, measured
     // -----------------------------------------------------------------------
+
+    /// @notice A real `deposit` fits the uniform action envelope.
+    ///
+    /// @dev Restored after being lost. The original gate measured deposit and the public
+    ///      `redeem` together; when `redeem` was removed the whole test went with it, silently
+    ///      taking deposit's only envelope gate along. Deposit is still a live action, so it
+    ///      still needs one.
+    ///
+    ///      Every cheatcode read is hoisted above `gasleft()`. `vm.parseJson` costs on the
+    ///      order of 450,000 gas and has landed inside a measurement bracket three separate
+    ///      times in this repo, each time inflating a reported number by more than the action
+    ///      itself costs.
+    function test_gate_realDepositFitsActionEnvelope() public {
+        uint256[2] memory dpA = _pA("deposit");
+        uint256[2][2] memory dpB = _pB("deposit");
+        uint256[2] memory dpC = _pC("deposit");
+        uint256 dCommitment = _u(".deposit.commitment");
+
+        vm.prank(depositor);
+        uint256 before = gasleft();
+        pool.deposit(dpA, dpB, dpC, dCommitment, MARKET_ID, UNITS);
+        uint256 used = before - gasleft();
+
+        console.log("=== REAL deposit() ===");
+        console.log("gas        :", used);
+        console.log("envelope   :", ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT);
+        console.log("utilisation:", used * 100 / ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT);
+
+        assertLt(used, ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT, "a real deposit does not fit the uniform envelope");
+    }
 
     function test_gate_realBetFitsActionEnvelope() public {
         _doDeposit();

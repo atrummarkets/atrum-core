@@ -376,7 +376,40 @@ Legacy markets also leak precisely what Phase 2 exists to hide: bet SIZE is publ
 `betData`, the running total is public, and odds move live — which reintroduces the late-money
 problem encryption solves.
 
-**Suite: 192 passing, 0 failing.**
+### Gaps found by auditing the deprecation, and closed
+
+The first pass left three, all found by asking what had been *asserted* rather than run:
+
+**`deposit` lost its only gas-envelope gate.** The deleted `test_gate_realDepositAndRedeemFitEnvelope`
+measured deposit and `redeem` in one test; removing `redeem` took deposit's gate with it.
+Deposit is still a live action. Restored as `test_gate_realDepositFitsActionEnvelope`.
+
+**`redeemPrivate` and `withdraw` were never gated at all** — both measured their gas and only
+`console.log`ed it. The envelope is the anti-fingerprinting control: Monad charges the DECLARED
+`gas_limit`, which is public, so every action must declare the same limit, which only works if
+every action fits under it. A number in a log nobody reads gates nothing. Both now assert.
+
+Measured against the 2,000,000 envelope:
+
+| action | gas | utilisation |
+|---|---|---|
+| `deposit` | 1,378,691 | 69% |
+| `withdraw` | 1,166,565 | 58% |
+| `redeemPrivate` | 1,126,337 | 56% |
+
+`deposit` is the binding constraint, not `withdraw` — and locally-measured deposit understates
+the real figure badly (§1: testnet 1,816,031, 91%).
+
+**A dead `redeemVerifier` was still deployed.** With `redeem()` gone nothing read the immutable,
+yet it remained a constructor argument and `Deploy.s.sol` still deployed a full 1,635-byte
+Groth16 verifier for it. Removed from the constructor and all 7 construction sites.
+
+Still outstanding and deliberately not fixed: the Makefile continues to build the `redeem`
+circuit and export `RedeemVerifier.sol`. Removing that means removing section 5 of the fixture
+generator, which is part of the same lifecycle rewrite described above.
+
+**Suite: 193 passing, 0 failing.** `forge fmt --check` clean, `make verifiers` clean, deploy
+script simulates successfully.
 
 ---
 

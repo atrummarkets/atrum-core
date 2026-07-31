@@ -12,7 +12,6 @@ import {ShieldedPool, IDepositVerifier, IActionVerifier, IActionVerifier8} from 
 import {ElGamalAccumulator} from "../src/ElGamalAccumulator.sol";
 import {DepositVerifier} from "../src/verifiers/DepositVerifier.sol";
 import {BetVerifier} from "../src/verifiers/BetVerifier.sol";
-import {RedeemVerifier} from "../src/verifiers/RedeemVerifier.sol";
 import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
 
 /// @dev Minimal 6-decimal USDC stand-in, so the checkup needs no live token.
@@ -194,7 +193,6 @@ contract CheckupTest is Test {
 
         DepositVerifier dv = new DepositVerifier();
         BetVerifier bv = new BetVerifier();
-        RedeemVerifier rv = new RedeemVerifier();
         BetEncryptedVerifier bev = new BetEncryptedVerifier();
 
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 4);
@@ -210,7 +208,6 @@ contract CheckupTest is Test {
             accumulator,
             IDepositVerifier(address(dv)),
             IActionVerifier(address(bv)),
-            IActionVerifier(address(rv)),
             IActionVerifier8(address(bev)),
             sequencer,
             address(this)
