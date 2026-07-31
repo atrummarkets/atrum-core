@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {Deploy} from "../script/Deploy.s.sol";
-import {ShieldedPool} from "../src/ShieldedPool.sol";
+import {ShieldedPool, IActionVerifier, IEncryptedTotals} from "../src/ShieldedPool.sol";
 import {Vault} from "../src/Vault.sol";
 
 /// @notice The deployment script's END STATE, asserted rather than eyeballed.
@@ -67,6 +67,38 @@ contract DeployConfigTest is Test {
         assertEq(address(pool.marketVault(ENCRYPTED_MARKET_ID)), d.encryptedVault, "encrypted fixture market missing");
         assertFalse(pool.encryptedMarket(MARKET_ID), "legacy market wrongly flagged encrypted");
         assertTrue(pool.encryptedMarket(ENCRYPTED_MARKET_ID), "encrypted market not flagged");
+    }
+
+    /// @notice THE EXIT PATH IS WIRED. Without this the pool is a one-way vault.
+    ///
+    /// @dev The first testnet deployment shipped with all three of these at address(0):
+    ///      `Deploy.s.sol` never called `bindEncryptedTotals`. Collateral could be deposited
+    ///      and bet, and nothing could ever be paid out -- `redeemPrivate` and `withdraw`
+    ///      both revert on a zero verifier, and the public `redeem()` had been removed.
+    ///
+    ///      The existing tests did not catch it because they asserted what the deployment
+    ///      REFUSES (legacy registration) and never what it must ENABLE. This is the missing
+    ///      half.
+    function test_deploy_exitPathIsWired() public view {
+        assertTrue(address(pool.encryptedTotals()) != address(0), "encryptedTotals unbound: nothing can settle");
+        assertTrue(address(pool.redeemPrivateVerifier()) != address(0), "redeemPrivateVerifier unbound");
+        assertTrue(address(pool.withdrawVerifier()) != address(0), "withdrawVerifier unbound");
+
+        // And bound to the right things, not merely non-zero.
+        assertEq(address(pool.encryptedTotals()), d.encryptedParimutuel, "bound to the wrong totals source");
+        assertEq(address(pool.redeemPrivateVerifier()), d.redeemPrivateVerifier, "wrong redeem verifier");
+        assertEq(address(pool.withdrawVerifier()), d.withdrawVerifier, "wrong withdraw verifier");
+    }
+
+    /// @notice Binding is one-shot, so a deployment cannot be silently re-pointed later.
+    function test_deploy_bindingIsAlreadyConsumed() public {
+        vm.prank(vm.addr(TEST_PK));
+        vm.expectRevert(ShieldedPool.AlreadyBound.selector);
+        pool.bindEncryptedTotals(
+            IEncryptedTotals(d.encryptedParimutuel),
+            IActionVerifier(d.redeemPrivateVerifier),
+            IActionVerifier(d.withdrawVerifier)
+        );
     }
 
     /// @notice The removed public payout path is gone from the deployed bytecode, not merely

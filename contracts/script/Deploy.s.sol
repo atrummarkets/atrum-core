@@ -7,12 +7,20 @@ import {IERC20} from "../src/interfaces/IERC20.sol";
 import {IncrementalMerkleTree, IPoseidonT3} from "../src/IncrementalMerkleTree.sol";
 import {MappingNullifierSet} from "../src/MappingNullifierSet.sol";
 import {ParimutuelPool} from "../src/ParimutuelPool.sol";
-import {ShieldedPool, IDepositVerifier, IActionVerifier, IActionVerifier8} from "../src/ShieldedPool.sol";
+import {
+    ShieldedPool,
+    IDepositVerifier,
+    IActionVerifier,
+    IActionVerifier8,
+    IEncryptedTotals
+} from "../src/ShieldedPool.sol";
 import {ElGamalAccumulator} from "../src/ElGamalAccumulator.sol";
 import {EncryptedParimutuelPool} from "../src/EncryptedParimutuelPool.sol";
 import {DepositVerifier} from "../src/verifiers/DepositVerifier.sol";
 import {BetVerifier} from "../src/verifiers/BetVerifier.sol";
 import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
+import {RedeemPrivateVerifier} from "../src/verifiers/RedeemPrivateVerifier.sol";
+import {WithdrawVerifier} from "../src/verifiers/WithdrawVerifier.sol";
 import {MockERC20} from "../test/mocks/MockERC20.sol";
 
 /// @notice Deploy the Phase 1 stack.
@@ -62,6 +70,8 @@ contract Deploy is Script {
         address depositVerifier;
         address betVerifier;
         address betEncryptedVerifier;
+        address redeemPrivateVerifier;
+        address withdrawVerifier;
         address tree;
         address parimutuel;
         address accumulator;
@@ -88,6 +98,8 @@ contract Deploy is Script {
         d.depositVerifier = address(new DepositVerifier());
         d.betVerifier = address(new BetVerifier());
         d.betEncryptedVerifier = address(new BetEncryptedVerifier());
+        d.redeemPrivateVerifier = address(new RedeemPrivateVerifier());
+        d.withdrawVerifier = address(new WithdrawVerifier());
 
         _deployPool(d, deployer, sequencer);
 
@@ -102,8 +114,21 @@ contract Deploy is Script {
         return address(usdc);
     }
 
+    /// @dev `EXERCISE_MODE=1` back-dates the schedule so betting is already closed and the
+    ///      market can be resolved immediately. That is the only way to drive the full
+    ///      lifecycle -- settle, redeemPrivate, withdraw -- through a real chain, where
+    ///      `vm.warp` does not exist and the default schedule is seven days out.
+    ///
+    ///      TESTNET ONLY. A back-dated market accepts no bets, because betting closed before
+    ///      it was deployed. It exists to measure gas on the exit path, not to trade.
     function _deployVault(address collateral, address deployer) internal returns (address) {
-        uint64 bettingClose = uint64(block.timestamp + 7 days);
+        bool exercise = vm.envOr("EXERCISE_MODE", uint256(0)) == 1;
+        // Betting must still be OPEN when the exercise places its bets, and resolution
+        // cannot begin until MIN_RESOLUTION_GAP (1 hour) after betting closes -- the Vault
+        // constructor enforces that, and it is a safety invariant rather than a knob. So the
+        // shortest honest schedule is a few minutes of betting followed by a one-hour wait,
+        // which is why the exercise runs in two phases.
+        uint64 bettingClose = exercise ? uint64(block.timestamp + 6 minutes) : uint64(block.timestamp + 7 days);
         return address(
             new Vault(
                 IERC20(collateral),
@@ -111,7 +136,7 @@ contract Deploy is Script {
                 deployer,
                 keccak256("Will Atrum ship Phase 2? -- resolves manually, testnet only"),
                 bettingClose,
-                bettingClose + 2 hours
+                exercise ? bettingClose + 1 hours : bettingClose + 2 hours
             )
         );
     }
@@ -175,6 +200,21 @@ contract Deploy is Script {
                 ElGamalAccumulator(d.accumulator), pool, COMMITTEE_KEY_X, COMMITTEE_KEY_Y, MIN_PUBLISH_INTERVAL
             )
         );
+
+        // THE EXIT PATH. Without this the pool accepts deposits and bets and can never pay
+        // anything out: `redeemPrivate` and `withdraw` both revert on a zero verifier, and
+        // the public `redeem()` was removed. A deployment missing this call is a one-way
+        // vault, and the first testnet deploy shipped exactly that -- all three of these
+        // slots were address(0) on chain.
+        //
+        // It is a separate call rather than a constructor argument because the dependency is
+        // circular: `EncryptedParimutuelPool` takes the pool's real address, so it cannot
+        // exist before the pool does. `bindEncryptedTotals` is one-shot and irreversible.
+        pool.bindEncryptedTotals(
+            IEncryptedTotals(d.encryptedParimutuel),
+            IActionVerifier(d.redeemPrivateVerifier),
+            IActionVerifier(d.withdrawVerifier)
+        );
     }
 
     function _report(Deployed memory d) internal view {
@@ -185,6 +225,8 @@ contract Deploy is Script {
         console.log("DepositVerifier      :", d.depositVerifier);
         console.log("BetVerifier          :", d.betVerifier);
         console.log("BetEncryptedVerifier :", d.betEncryptedVerifier);
+        console.log("RedeemPrivateVerifier:", d.redeemPrivateVerifier);
+        console.log("WithdrawVerifier     :", d.withdrawVerifier);
         console.log("IncrementalMerkleTree:", d.tree);
         console.log("ParimutuelPool       :", d.parimutuel);
         console.log("ElGamalAccumulator   :", d.accumulator);

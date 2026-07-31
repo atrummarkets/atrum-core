@@ -1,5 +1,13 @@
 # Monad testnet deployment — chain 10143
 
+> **The first deployment below (`0x8Ea2…4464`) is a ONE-WAY VAULT and must not be used.**
+> `Deploy.s.sol` never called `bindEncryptedTotals`, so `encryptedTotals`,
+> `redeemPrivateVerifier` and `withdrawVerifier` are all `address(0)` on chain. Collateral can
+> be deposited and bet, and nothing can ever be paid out — `redeemPrivate` and `withdraw` both
+> revert on a zero verifier, and the public `redeem()` was removed. Fixed in `Deploy.s.sol`,
+> with `test_deploy_exitPathIsWired` added to catch it; that test was verified to FAIL when the
+> bind call is removed. Superseded by `0x874F…6d54`.
+
 First live deployment of the shielded pool, with the plaintext deprecation active on chain.
 Raw signed receipts are in [`receipts/`](receipts/) (`contracts/broadcast/` is gitignored, so
 they are copied here to be preserved).
