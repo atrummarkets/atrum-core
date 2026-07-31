@@ -72,7 +72,7 @@ contract Deploy is Script {
         address pool;
     }
 
-    function run() external {
+    function run() external returns (Deployed memory d) {
         uint256 pk = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(pk);
         address sequencer = vm.envOr("SEQUENCER", deployer);
@@ -82,7 +82,6 @@ contract Deploy is Script {
 
         vm.startBroadcast(pk);
 
-        Deployed memory d;
         d.poseidon = _deployPoseidon();
         d.collateral = _deployCollateral(deployer);
         d.vault = _deployVault(d.collateral, deployer);
@@ -153,11 +152,25 @@ contract Deploy is Script {
 
         MappingNullifierSet(d.nullifiers).bindPool(d.pool);
 
-        // Both modes, so a deployment exercises the Phase 1 and Phase 2 paths side by
-        // side. `registerEncryptedMarket` also initialises the accumulator to Enc(0) for
-        // both outcomes -- see its notice for why that is not left to a separate call.
-        pool.registerMarket(MARKET_ID, Vault(d.vault));
+        // The encrypted market is the product. `registerEncryptedMarket` also initialises the
+        // accumulator to Enc(0) for both outcomes -- see its notice for why that is not left
+        // to a separate call.
         pool.registerEncryptedMarket(ENCRYPTED_MARKET_ID, Vault(d.encryptedVault));
+
+        // MARKET_ID is a DEPRECATED plaintext market, registered only so `Exercise.s.sol` can
+        // replay the recorded fixture lifecycle, whose Merkle tree contains legacy leaves.
+        // Anything deposited into it is unrecoverable: the public `redeem()` was removed for
+        // leaking a recipient and an amount, and `redeemPrivate` cannot serve this market
+        // because it reads settled totals from `EncryptedParimutuelPool`, which a plaintext
+        // market has none of.
+        pool.registerMarket(MARKET_ID, Vault(d.vault));
+
+        // ...and then the door is shut, irreversibly, in the same transaction that opened it.
+        // This is the enforced half of the deprecation: the two markets above are the last
+        // plaintext and encrypted markets this deployment will ever have from `registerMarket`,
+        // so no future operator can strand funds in a third. `registerEncryptedMarket` is
+        // deliberately NOT affected -- see `freezeLegacyMarkets`.
+        pool.freezeLegacyMarkets();
 
         // Settlement reads from here, and only from here. Deployed after the pool because
         // it takes the pool's real address rather than a predicted one.

@@ -617,6 +617,91 @@ async function main() {
   };
 
   // -------------------------------------------------------------------------
+  // 6c. WITHDRAW: the SETTLED note leaves for public USDC, keeping change.
+  //
+  //     Spends the note `redeemPrivate` just produced, so this only works against a tree
+  //     that contains it -- batch 6 grafts it, and the contract's root must match
+  //     `rootAfterBatch6`.
+  //
+  //     The withdrawal is PARTIAL on purpose. A settled payout is whatever the parimutuel
+  //     arithmetic produced, and that exact number identifies the position that earned it;
+  //     withdrawing a round amount instead is what keeps the exit unlinkable. The remainder
+  //     comes back as a change note that is still SETTLED, so it stays withdrawable and
+  //     stays un-redeemable.
+  //
+  //     Variable names carry a `wd` prefix: an earlier addition to this file reused names
+  //     already bound above and failed to parse, and a blanket rename then silently mangled
+  //     the witness input keys, which must be the CIRCUIT's signal names.
+  // -------------------------------------------------------------------------
+  const wdBatch = [rpSettledCommitment];
+  while (wdBatch.length < BATCH_SIZE) {
+    wdBatch.push(derivedFiller(5 * BATCH_SIZE, wdBatch.length));
+  }
+  for (const leaf of wdBatch) tree.insert(leaf);
+
+  const wdRootAfterBatch = tree.root();
+  fixtures.batch6 = wdBatch.map((x) => x.toString());
+  fixtures.batch6Real = [rpSettledCommitment.toString()];
+  fixtures.rootAfterBatch6 = wdRootAfterBatch.toString();
+
+  // The settled note is the first leaf of batch 6.
+  const wdPath = tree.path(5 * BATCH_SIZE);
+
+  // Take a round 60 of the 100-unit payout, leaving 40 as change.
+  const wdAmount = 60n;
+  const wdChange = rpPayout - wdAmount;
+  assert(wdAmount + wdChange === rpPayout, "withdraw does not conserve the note value");
+  assert(wdAmount > 0n, "withdraw amount must be non-zero");
+
+  // Anvil account 0, matching the recipient the Solidity suite checks.
+  const wdRecipient = 0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266n;
+
+  const wdChangeNote = {
+    nullifier: randomField(),
+    secret: randomField(),
+    marketId: ENCRYPTED_MARKET_ID,
+    outcome: RP_SETTLED,
+    units: wdChange,
+  };
+  const wdChangeCommitment = noteCommitment(wdChangeNote);
+  const wdNullifierHash = nullifierHash(rpSettledNote.nullifier);
+
+  // withdrawData = marketId * 2^200 + recipient * 2^40 + amount
+  const wdWithdrawData =
+    ENCRYPTED_MARKET_ID * (1n << 200n) + wdRecipient * (1n << 40n) + wdAmount;
+
+  const wdProof = await prove("withdraw", {
+    root: wdRootAfterBatch,
+    nullifierHash: wdNullifierHash,
+    changeCommitment: wdChangeCommitment,
+    withdrawData: wdWithdrawData,
+    nullifier: rpSettledNote.nullifier,
+    secret: rpSettledNote.secret,
+    newNullifier: wdChangeNote.nullifier,
+    newSecret: wdChangeNote.secret,
+    marketId: ENCRYPTED_MARKET_ID,
+    units: rpPayout,
+    recipient: wdRecipient,
+    amount: wdAmount,
+    change: wdChange,
+    pathElements: wdPath.pathElements,
+    pathIndices: wdPath.pathIndices,
+  });
+
+  fixtures.withdraw = {
+    ...wdProof,
+    root: wdRootAfterBatch.toString(),
+    nullifierHash: wdNullifierHash.toString(),
+    changeCommitment: wdChangeCommitment.toString(),
+    withdrawData: wdWithdrawData.toString(),
+    // For assertions only -- the note value and the change are PRIVATE and never sent.
+    amount: wdAmount.toString(),
+    recipient: "0x" + wdRecipient.toString(16),
+    privateNoteValue: rpPayout.toString(),
+    privateChange: wdChange.toString(),
+  };
+
+  // -------------------------------------------------------------------------
   // 7. Negative fixture: a bet proof for a note that was never deposited.
   //    The contract must reject it, and the only thing standing in the way is the
   //    Merkle constraint -- worth having a real counterexample rather than trusting it.

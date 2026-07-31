@@ -470,24 +470,15 @@ contract CheckupTest is Test {
         _eq(uint8(vault.outcome()), 1, "resolve -> outcome = Yes");
         _eq(parimutuel.payoutUnits(MARKET_ID, 1, lifeUnits), lifeUnits, "payoutUnits (sole winner takes the pool)");
 
-        uint256[2] memory pA = _pA("redeem");
-        uint256[2][2] memory pB = _pB("redeem");
-        uint256[2] memory pC = _pC("redeem");
-        uint256 root = _u(".redeem.root");
-        uint256 nh = _u(".redeem.nullifierHash");
-        uint256 payoutData = _u(".redeem.payoutData");
-        uint256 marketMeta = _u(".redeem.marketMeta");
-
-        address recipient = address(uint160(_u(".redeem.recipient")));
-        uint256 before = usdc.balanceOf(recipient);
-
-        uint256 g = gasleft();
-        pool.redeem(pA, pB, pC, root, nh, payoutData, marketMeta);
-        gasRedeem = g - gasleft();
-
-        _eq(usdc.balanceOf(recipient) - before, lifeUnits * DENOM, "redeem -> collateral paid to recipient");
-        _check(nullifiers.isSpent(nh), "redeem -> nullifier burned", "paid exactly once");
-        _reportGas("redeem", gasRedeem);
+        // The public `redeem()` has been REMOVED. It published a recipient address and a
+        // payout amount, which both build plans forbid outright: a public payout claim
+        // retroactively deanonymises every position it pays.
+        //
+        // The replacement path -- `redeemPrivate` -> `withdraw` -- is exercised end to end in
+        // `PrivateRedeem.t.sol`, which sets up the settled-totals binding this lightweight
+        // walkthrough deliberately does not.
+        _ok("redeem (public)", "REMOVED -- replaced by redeemPrivate + withdraw");
+        gasRedeem = 0;
     }
 
     /// @dev Reports against the envelope rather than asserting a ceiling. The authoritative

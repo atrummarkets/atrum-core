@@ -59,6 +59,9 @@ VARIANTS = [
     # Private redemption. Four signals: the payout and the position size are BOTH private,
     # so the totals are packed into `redeemMeta` rather than published separately.
     ("RedeemPrivateVerifier", "redeem_private", 4),
+    # The exit. Amount and recipient are public here by necessity; the note value and the
+    # change are not, so conservation is proved in-circuit.
+    ("WithdrawVerifier", "withdraw", 4),
 ]
 
 

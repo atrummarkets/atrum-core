@@ -30,6 +30,12 @@ import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
 ///      matters -- public-signal ordering, the packing layout disagreeing between
 ///      circom and Solidity, and in-circuit Poseidon diverging from the etched
 ///      on-chain one. Each of those verifies fine in isolation and reverts on-chain.
+/// @dev NOTE: the public `redeem()` was removed -- it published a recipient address and a
+///      payout amount, which both build plans forbid. The lifecycle tests that exercised it
+///      (`test_fullLifecycle_depositBetResolveRedeem`,
+///      `test_gate_realDepositAndRedeemFitEnvelope`, and the two redeem revert cases) went
+///      with it. The replacement path is covered end to end in `PrivateRedeem.t.sol`:
+///      bet -> settle -> redeemPrivate -> withdraw, with the payout never public.
 contract ShieldedPoolTest is Test {
     using stdJson for string;
 
@@ -291,100 +297,6 @@ contract ShieldedPoolTest is Test {
         );
     }
 
-    function test_fullLifecycle_depositBetResolveRedeem() public {
-        _doDeposit();
-        _flush(".batch1Real");
-
-        pool.bet(
-            _pA("bet"),
-            _pB("bet"),
-            _pC("bet"),
-            _u(".bet.root"),
-            _u(".bet.nullifierHash"),
-            _u(".bet.newCommitment"),
-            _u(".bet.betData")
-        );
-
-        _flush(".batch2Real");
-        assertEq(tree.root(), _u(".rootAfterBatch2"), "root diverged after second batch");
-
-        vm.warp(resolutionStart + 1);
-        vm.prank(resolver);
-        vault.resolve(Vault.Outcome.Yes);
-
-        uint256 before = usdc.balanceOf(FIXTURE_RECIPIENT);
-
-        pool.redeem(
-            _pA("redeem"),
-            _pB("redeem"),
-            _pC("redeem"),
-            _u(".redeem.root"),
-            _u(".redeem.nullifierHash"),
-            _u(".redeem.payoutData"),
-            _u(".redeem.marketMeta")
-        );
-
-        // Sole bettor on the winning side, so the payout is the whole staked pool.
-        assertEq(usdc.balanceOf(FIXTURE_RECIPIENT) - before, UNITS * DENOM, "winner did not receive the pool");
-        assertTrue(nullifiers.isSpent(_u(".redeem.nullifierHash")), "position not burned");
-    }
-
-    function test_redeem_revertsBeforeResolution() public {
-        _doDeposit();
-        _flush(".batch1Real");
-        pool.bet(
-            _pA("bet"),
-            _pB("bet"),
-            _pC("bet"),
-            _u(".bet.root"),
-            _u(".bet.nullifierHash"),
-            _u(".bet.newCommitment"),
-            _u(".bet.betData")
-        );
-        _flush(".batch2Real");
-
-        vm.expectRevert(ShieldedPool.NotResolved.selector);
-        pool.redeem(
-            _pA("redeem"),
-            _pB("redeem"),
-            _pC("redeem"),
-            _u(".redeem.root"),
-            _u(".redeem.nullifierHash"),
-            _u(".redeem.payoutData"),
-            _u(".redeem.marketMeta")
-        );
-    }
-
-    function test_redeem_revertsForLosingSide() public {
-        _doDeposit();
-        _flush(".batch1Real");
-        pool.bet(
-            _pA("bet"),
-            _pB("bet"),
-            _pC("bet"),
-            _u(".bet.root"),
-            _u(".bet.nullifierHash"),
-            _u(".bet.newCommitment"),
-            _u(".bet.betData")
-        );
-        _flush(".batch2Real");
-
-        vm.warp(resolutionStart + 1);
-        vm.prank(resolver);
-        vault.resolve(Vault.Outcome.No); // fixture bet YES
-
-        vm.expectRevert(ShieldedPool.LosingPosition.selector);
-        pool.redeem(
-            _pA("redeem"),
-            _pB("redeem"),
-            _pC("redeem"),
-            _u(".redeem.root"),
-            _u(".redeem.nullifierHash"),
-            _u(".redeem.payoutData"),
-            _u(".redeem.marketMeta")
-        );
-    }
-
     // -----------------------------------------------------------------------
     // Sequencer constraints
     // -----------------------------------------------------------------------
@@ -479,54 +391,6 @@ contract ShieldedPoolTest is Test {
         console.log("utilisation:", used * 100 / ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT);
 
         assertLt(used, ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT, "a real bet does not fit the uniform action envelope");
-    }
-
-    function test_gate_realDepositAndRedeemFitEnvelope() public {
-        // Same hoisting as above: cheatcode parsing must not land inside the measurement.
-        uint256[2] memory dpA = _pA("deposit");
-        uint256[2][2] memory dpB = _pB("deposit");
-        uint256[2] memory dpC = _pC("deposit");
-        uint256 dCommitment = _u(".deposit.commitment");
-
-        vm.prank(depositor);
-        uint256 before = gasleft();
-        pool.deposit(dpA, dpB, dpC, dCommitment, MARKET_ID, UNITS);
-        uint256 depositGas = before - gasleft();
-
-        _flush(".batch1Real");
-        pool.bet(
-            _pA("bet"),
-            _pB("bet"),
-            _pC("bet"),
-            _u(".bet.root"),
-            _u(".bet.nullifierHash"),
-            _u(".bet.newCommitment"),
-            _u(".bet.betData")
-        );
-        _flush(".batch2Real");
-
-        vm.warp(resolutionStart + 1);
-        vm.prank(resolver);
-        vault.resolve(Vault.Outcome.Yes);
-
-        uint256[2] memory rpA = _pA("redeem");
-        uint256[2][2] memory rpB = _pB("redeem");
-        uint256[2] memory rpC = _pC("redeem");
-        uint256 rRoot = _u(".redeem.root");
-        uint256 rNh = _u(".redeem.nullifierHash");
-        uint256 rPayout = _u(".redeem.payoutData");
-        uint256 rMeta = _u(".redeem.marketMeta");
-
-        uint256 before2 = gasleft();
-        pool.redeem(rpA, rpB, rpC, rRoot, rNh, rPayout, rMeta);
-        uint256 redeemGas = before2 - gasleft();
-
-        console.log("=== REAL deposit() / redeem() ===");
-        console.log("deposit gas:", depositGas);
-        console.log("redeem gas :", redeemGas);
-
-        assertLt(depositGas, ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT, "deposit overflows envelope");
-        assertLt(redeemGas, ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT, "redeem overflows envelope");
     }
 
     /// @notice The sequencer's batch is a separate transaction and only has to fit the

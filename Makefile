@@ -73,7 +73,7 @@ verifiers: ## Copy generated verifiers into contracts/src/verifiers and build
 	@mkdir -p contracts/src/verifiers
 	@for pair in "probe_fixed_key:FixedKeyVerifier" "probe_pubkey_input:PubKeyInputVerifier" \
 	             "deposit:DepositVerifier" "bet:BetVerifier" "redeem:RedeemVerifier" \
-	             "bet_encrypted:BetEncryptedVerifier" "redeem_private:RedeemPrivateVerifier"; do \
+	             "bet_encrypted:BetEncryptedVerifier" "redeem_private:RedeemPrivateVerifier" "withdraw:WithdrawVerifier"; do \
 		src="$${pair%%:*}"; name="$${pair##*:}"; \
 		sed "s/contract Groth16Verifier/contract $$name/" \
 			"circuits/build/$${src}_verifier.sol" > "contracts/src/verifiers/$${name}.sol"; \

@@ -83,6 +83,8 @@ CIRCUITS=(
     bet_encrypted:15
     # 14,405 total constraints, past power 13's 8,192 ceiling.
     redeem_private:14
+    # 14,438 total constraints, past power 13's 8,192 ceiling.
+    withdraw:14
 )
 
 for entry in "${CIRCUITS[@]}"; do

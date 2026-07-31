@@ -300,10 +300,12 @@ attacks, plaintext-market rejection, and bind irreversibility.
 
 ---
 
-## 1d. `withdraw` — circuit built, contract path NOT built
+## 1d. `withdraw` — BUILT end to end
 
-The exit: a SETTLED note becomes public USDC. **32 soundness attacks pass; there is no
-`ShieldedPool.withdraw` yet.**
+The exit: a SETTLED note becomes public USDC. **32 soundness attacks pass, `ShieldedPool.withdraw`
+is built and measured at 1,166,565 gas**, and the whole private path is verified in one test:
+`betEncrypted(100) + betEncrypted(37)` → settle 137 → `redeemPrivate` (payout stays a note) →
+`withdraw` 60 public / 40 held back as change.
 
 Stated plainly: the **amount and recipient are public and must be** — real collateral moves and
 a transfer is visible. Privacy comes from unlinkability instead: which note funded it is
@@ -320,6 +322,61 @@ the contract can check neither. Seven attacks cover it, including the one that m
 **`amount = 2^200` with a complementary negative change**, which satisfies the sum modulo the
 field while paying out vastly more than the note holds. The range checks on both halves stop
 it.
+
+---
+
+## 1d-bis. Plaintext markets are DEPRECATED — what that did and did not remove
+
+Acting on "deprecate plaintexts". The end state is one market type and one exit.
+
+### Removed outright
+
+**`ShieldedPool.redeem()` is gone**, with `_settleRedeem`, `_owedUnits` and
+`_unpackPayoutData`. It published `payoutData = recipient * 2^64 + units` — a public address
+and a public amount — which is the exact thing `atrum-build-plan.md` says never to ship,
+because a public payout claim retroactively reveals every position. Its replacement is the
+two-step `redeemPrivate` → `withdraw` in §1c and §1d.
+
+Four tests went with it (`test_fullLifecycle_depositBetResolveRedeem`,
+`test_gate_realDepositAndRedeemFitEnvelope`, and two revert cases). The lifecycle they covered
+is covered better by `PrivateRedeem.t.sol`, which runs the same arc with the payout private.
+
+### The consequence, stated plainly
+
+**A plaintext market now has NO redemption path at all.** `redeemPrivate` cannot serve one: it
+reads settled totals from `EncryptedParimutuelPool`, which a plaintext market does not have —
+its total lives in `ParimutuelPool` in the clear. So collateral deposited into a legacy market
+is stuck. That is acceptable only because no legacy market will ever hold real money, which is
+what the freeze below enforces.
+
+### Enforced, not just documented
+
+`Deploy.s.sol` now registers the two fixture markets and then calls `freezeLegacyMarkets()` **in
+the same transaction that opened them**. A deployed instance can never acquire a third legacy
+market, so no future operator can strand funds in one. `registerEncryptedMarket` is
+deliberately unaffected — freezing both would make the deployment inert.
+
+`DeployConfig.t.sol` (new, 5 tests) asserts that end state instead of eyeballing console output,
+which is what the script's correctness previously rested on. It checks the freeze holds against
+the admin themselves, that encrypted registration still works, and that the removed `redeem`
+selector is absent **from the deployed bytecode** — with the same scan first required to FIND
+`withdraw`, so a miss means absence rather than a broken scan.
+
+### NOT removed, and why
+
+`registerMarket`, `bet()`, the `ParimutuelPool` wiring and the plaintext verifiers are still in
+the tree. Deleting them requires regenerating `gen_action_fixtures.mjs` as an all-encrypted
+lifecycle: sections 1–5 are the plaintext leg, and the encrypted sections graft onto the tree
+it builds. Dropping them renumbers every batch, which changes every leaf index and therefore
+every root and every proof — so every recorded fixture and every Solidity test asserting a root
+has to be regenerated together. That is a mechanical but wide change, and it is the remaining
+item; the deprecation above is what makes it safe to defer.
+
+Legacy markets also leak precisely what Phase 2 exists to hide: bet SIZE is public in
+`betData`, the running total is public, and odds move live — which reintroduces the late-money
+problem encryption solves.
+
+**Suite: 192 passing, 0 failing.**
 
 ---
 

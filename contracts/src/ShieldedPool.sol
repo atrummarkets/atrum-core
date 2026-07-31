@@ -148,6 +148,10 @@ contract ShieldedPool {
     ///         newCommitment, redeemMeta.
     IActionVerifier public redeemPrivateVerifier;
 
+    /// @notice Verifier for `withdraw`. Four public signals: root, nullifierHash,
+    ///         changeCommitment, withdrawData.
+    IActionVerifier public withdrawVerifier;
+
     /// @notice Where settled pool totals are read from, for private redemption.
     /// @dev Bound once, after construction, because the dependency is circular:
     ///      `EncryptedParimutuelPool` needs this pool's address to be constructed. Binding is
@@ -209,6 +213,11 @@ contract ShieldedPool {
     event Spent(uint256 indexed nullifierHash);
     event Redeemed(address indexed recipient, uint32 indexed marketId, uint256 payoutUnits);
 
+    /// @notice Emitted when collateral actually leaves the pool.
+    /// @dev The amount and recipient are public here, and must be -- a transfer is visible.
+    ///      Privacy comes from unlinkability, not from hiding this event.
+    event Withdrawn(address indexed recipient, uint32 indexed marketId, uint256 amount);
+
     // -----------------------------------------------------------------------
     // Errors
     // -----------------------------------------------------------------------
@@ -233,6 +242,7 @@ contract ShieldedPool {
     error AlreadyBound();
     error TotalsMismatch();
     error LosingOrSettledPosition();
+    error ZeroAmount();
     error WrongActionForMarket();
     error LegacyMarketsAreFrozen();
 
@@ -270,8 +280,26 @@ contract ShieldedPool {
         admin = admin_;
     }
 
-    /// @notice Register a Phase 1 market: shielded positions over a PUBLIC pool total.
-    /// @dev Refused once `freezeLegacyMarkets` has been called.
+    /// @notice DEPRECATED. Register a Phase 1 market: shielded positions over a PUBLIC pool.
+    ///
+    /// @dev DO NOT USE. Call `freezeLegacyMarkets()` immediately after deployment instead.
+    ///
+    ///      COLLATERAL DEPOSITED INTO A LEGACY MARKET CANNOT BE RECOVERED. The public
+    ///      `redeem()` was removed because it published a recipient and an amount, which both
+    ///      build plans forbid. Nothing replaced it for this market type: `redeemPrivate`
+    ///      requires `encryptedMarket[marketId]` and reads settled totals from
+    ///      `EncryptedParimutuelPool`, which a legacy market does not have -- its total lives
+    ///      in `ParimutuelPool` as plaintext. So a legacy market supports deposit and bet, and
+    ///      then the funds are stuck.
+    ///
+    ///      Kept only so existing test fixtures, whose Merkle tree contains legacy leaves, can
+    ///      still be replayed. It is scheduled for removal together with `bet()` and the
+    ///      `ParimutuelPool` wiring once the fixture lifecycle is regenerated as
+    ///      all-encrypted.
+    ///
+    ///      Legacy markets also leak what Phase 2 exists to hide: the bet SIZE is public in
+    ///      `betData`, the running pool total is public, and the odds move live -- which
+    ///      reintroduces the late-money problem encryption solves.
     function registerMarket(uint32 marketId, Vault vault) external {
         if (msg.sender != admin) revert NotAdmin();
         if (legacyMarketsFrozen) revert LegacyMarketsAreFrozen();
@@ -516,51 +544,24 @@ contract ShieldedPool {
     ///      the non-IR codegen. `via_ir` would fix it too, but turning it on changes
     ///      every gas figure in MEASUREMENTS.md, and those numbers are the point of
     ///      this repo.
-    function redeem(
-        uint256[2] calldata pA,
-        uint256[2][2] calldata pB,
-        uint256[2] calldata pC,
-        uint256 root,
-        uint256 nullifierHash,
-        uint256 payoutData,
-        uint256 marketMeta
-    ) external {
-        if (!tree.isKnownRoot(root)) revert UnknownRoot();
-        if (nullifiers.isSpent(nullifierHash)) revert NullifierAlreadySpent();
-
-        if (!redeemVerifier.verifyProof(pA, pB, pC, [root, nullifierHash, payoutData, marketMeta])) {
-            revert InvalidProof();
-        }
-
-        _settleRedeem(nullifierHash, payoutData, marketMeta);
-    }
-
-    function _settleRedeem(uint256 nullifierHash, uint256 payoutData, uint256 marketMeta) private {
-        (address recipient, uint256 units) = _unpackPayoutData(payoutData);
-        (uint32 marketId, uint8 outcome) = _unpackMarketMeta(marketMeta);
-
-        if (units == 0) revert ZeroUnits();
-        if (recipient == address(0)) revert InvalidRecipient();
-
-        Vault vault = marketVault[marketId];
-        if (address(vault) == address(0)) revert MarketNotRegistered();
-
-        uint256 owed = _owedUnits(vault, marketId, outcome, units);
-
-        nullifiers.spend(nullifierHash);
-        emit Spent(nullifierHash);
-
-        // The pool holds one complete set per deposited unit, so it always holds enough
-        // of the winning token to cover `owed`: pro-rata payouts sum to exactly the
-        // staked total, and refunds to exactly the unbet total.
-        vault.redeem(owed);
-
-        if (!vault.collateral().transfer(recipient, owed * vault.denomination())) {
-            revert TransferFailed();
-        }
-
-        emit Redeemed(recipient, marketId, owed);
-    }
+    /// @notice REMOVED: the public redemption path.
+    ///
+    /// @dev `redeem()` published a recipient address and a payout amount. Both build plans
+    ///      forbid that outright -- `atrum-build-plan.md`: *"Never cut private redemption"*;
+    ///      `atrum-4day-plan.md` §7: *"Redemption stays inside the shielded pool.
+    ///      Non-negotiable."* A public payout retroactively deanonymises every position it
+    ///      pays, which makes the privacy claim FALSE rather than weak.
+    ///
+    ///      `redeemPrivate` + `withdraw` replace it: the payout becomes a shielded note, and
+    ///      the exit is a separate action at a time and size of the holder's choosing.
+    ///
+    ///      Deleted rather than deprecated. A disabled-but-present payout path is one
+    ///      `if` away from being re-enabled, and this is the single function whose existence
+    ///      invalidates the product's central claim.
+    ///
+    ///      CONSEQUENCE, STATED PLAINLY: plaintext (Phase 1) markets now have no redemption
+    ///      path at all. That is why `registerMarket` is disabled -- see below. Encrypted
+    ///      markets are the only supported type.
 
     // -----------------------------------------------------------------------
     // PRIVATE REDEEM -- the item both build plans refuse to cut
@@ -570,12 +571,20 @@ contract ShieldedPool {
     /// @dev Two-step rather than constructor injection because `EncryptedParimutuelPool`
     ///      needs this contract's address to exist first. Irreversible: after this call
     ///      nobody, including the admin, can repoint where payouts are computed from.
-    function bindEncryptedTotals(IEncryptedTotals totals, IActionVerifier verifier) external {
+    function bindEncryptedTotals(
+        IEncryptedTotals totals,
+        IActionVerifier redeemVerifier_,
+        IActionVerifier withdrawVerifier_
+    ) external {
         if (msg.sender != admin) revert NotAdmin();
         if (address(encryptedTotals) != address(0)) revert AlreadyBound();
-        if (address(totals) == address(0) || address(verifier) == address(0)) revert InvalidRecipient();
+        if (
+            address(totals) == address(0) || address(redeemVerifier_) == address(0)
+                || address(withdrawVerifier_) == address(0)
+        ) revert InvalidRecipient();
         encryptedTotals = totals;
-        redeemPrivateVerifier = verifier;
+        redeemPrivateVerifier = redeemVerifier_;
+        withdrawVerifier = withdrawVerifier_;
     }
 
     /// @notice Redeem a position into a NEW SHIELDED NOTE. Nothing is paid out here.
@@ -655,6 +664,103 @@ contract ShieldedPool {
         // faithfully computes an inflated payout from invented inputs.
         if (totalPool != yes + no) revert TotalsMismatch();
         if (winningPool != (winning == OUTCOME_YES ? yes : no)) revert TotalsMismatch();
+    }
+
+    // -----------------------------------------------------------------------
+    // WITHDRAW -- the exit. Collateral leaves here and nowhere else.
+    // -----------------------------------------------------------------------
+
+    /// @notice Spend a SETTLED note: pay `amount` to `recipient`, keep the change as a note.
+    ///
+    /// @dev WHAT IS PUBLIC HERE, AND WHY THAT IS ACCEPTABLE
+    ///
+    ///      The amount and the recipient are public, and they have to be -- real collateral
+    ///      moves and a transfer is visible on any public chain. No cryptography hides an
+    ///      outgoing payment.
+    ///
+    ///      Privacy comes from UNLINKABILITY instead: which note funded this is hidden (the
+    ///      anonymity set is every other note in the tree), `redeemPrivate` already severed
+    ///      position from payout, and the timing is the holder's choice rather than the
+    ///      moment their position settled.
+    ///
+    ///      PARTIAL WITHDRAWAL IS A PRIVACY FEATURE, NOT A CONVENIENCE
+    ///
+    ///      A settled payout is whatever the parimutuel arithmetic produced -- 137, 1,041, an
+    ///      odd number -- and that number identifies the position that earned it. If the only
+    ///      option were withdrawing a note in full, the public amount would leak precisely
+    ///      what `redeemPrivate` protects. Withdrawing round amounts instead makes withdrawals
+    ///      look alike; the remainder returns as a change note.
+    ///
+    ///      The ladder is NOT enforced on-chain. Enforcing it would strand the odd remainder
+    ///      permanently as unwithdrawable dust and burn a tree leaf per partial withdrawal,
+    ///      against a tree capped at 2^20. The client defaults to round amounts; a user who
+    ///      insists on withdrawing an identifying amount is deanonymising only themselves.
+    ///
+    ///      Conservation (`amount + change == units`) is proved in-circuit, because the
+    ///      contract can see neither the note's value nor the change.
+    function withdraw(
+        uint256[2] calldata pA,
+        uint256[2][2] calldata pB,
+        uint256[2] calldata pC,
+        uint256 root,
+        uint256 nullifierHash,
+        uint256 changeCommitment,
+        uint256 withdrawData
+    ) external {
+        if (!tree.isKnownRoot(root)) revert UnknownRoot();
+        if (nullifiers.isSpent(nullifierHash)) revert NullifierAlreadySpent();
+
+        (uint32 marketId, address recipient, uint256 amount) = _unpackWithdrawData(withdrawData);
+        _checkWithdrawable(marketId, recipient, amount);
+
+        if (!withdrawVerifier.verifyProof(pA, pB, pC, [root, nullifierHash, changeCommitment, withdrawData])) {
+            revert InvalidProof();
+        }
+
+        // Burn, queue the change, THEN move money. Nullifier first so a reentrant call
+        // through the collateral token cannot spend the same note twice.
+        nullifiers.spend(nullifierHash);
+        emit Spent(nullifierHash);
+        _queue(changeCommitment);
+
+        Vault vault = marketVault[marketId];
+        vault.redeem(amount);
+
+        if (!vault.collateral().transfer(recipient, amount * vault.denomination())) {
+            revert TransferFailed();
+        }
+
+        emit Withdrawn(recipient, marketId, amount);
+    }
+
+    function _checkWithdrawable(uint32 marketId, address recipient, uint256 amount) private view {
+        if (recipient == address(0)) revert InvalidRecipient();
+        // Rejected in-circuit too. Checked again because a zero withdrawal burns the note and
+        // pays nothing -- a silent loss of funds with no error anywhere.
+        if (amount == 0) revert ZeroAmount();
+
+        Vault vault = marketVault[marketId];
+        if (address(vault) == address(0)) revert MarketNotRegistered();
+
+        // Encrypted markets only. A SETTLED note can today only come from `redeemPrivate`,
+        // which is already encrypted-only -- but that is a reachability argument spanning two
+        // circuits and a contract, and this is where collateral leaves. Assert it directly.
+        if (!encryptedMarket[marketId]) revert WrongActionForMarket();
+
+        if (address(encryptedTotals) == address(0)) revert AlreadyBound();
+        if (!encryptedTotals.settled(marketId)) revert NotSettled2();
+    }
+
+    /// @dev withdrawData = marketId * 2^200 + recipient * 2^40 + amount
+    ///      Must match `withdraw.circom` exactly.
+    function _unpackWithdrawData(uint256 withdrawData)
+        internal
+        pure
+        returns (uint32 marketId, address recipient, uint256 amount)
+    {
+        amount = withdrawData & ((uint256(1) << 40) - 1);
+        recipient = address(uint160((withdrawData >> 40) & type(uint160).max));
+        marketId = uint32(withdrawData >> 200);
     }
 
     /// @dev redeemMeta = marketId * 2^130 + outcome * 2^128 + totalPool * 2^64 + winningPool

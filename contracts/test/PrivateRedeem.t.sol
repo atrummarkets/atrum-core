@@ -23,6 +23,7 @@ import {BetVerifier} from "../src/verifiers/BetVerifier.sol";
 import {RedeemVerifier} from "../src/verifiers/RedeemVerifier.sol";
 import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
 import {RedeemPrivateVerifier} from "../src/verifiers/RedeemPrivateVerifier.sol";
+import {WithdrawVerifier} from "../src/verifiers/WithdrawVerifier.sol";
 
 /// @notice PRIVATE REDEMPTION -- the one item both build plans refuse to cut.
 ///
@@ -101,6 +102,7 @@ contract PrivateRedeemTest is Test {
         RedeemVerifier rv = new RedeemVerifier();
         BetEncryptedVerifier bev = new BetEncryptedVerifier();
         RedeemPrivateVerifier rpv = new RedeemPrivateVerifier();
+        WithdrawVerifier wv = new WithdrawVerifier();
 
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 4);
         tree = new IncrementalMerkleTree(poseidon, ZERO_VALUE, predicted);
@@ -130,7 +132,9 @@ contract PrivateRedeemTest is Test {
             accumulator, pool, _e(".committeeKey[0]"), _e(".committeeKey[1]"), MIN_PUBLISH_INTERVAL
         );
 
-        pool.bindEncryptedTotals(IEncryptedTotals(address(encrypted)), IActionVerifier(address(rpv)));
+        pool.bindEncryptedTotals(
+            IEncryptedTotals(address(encrypted)), IActionVerifier(address(rpv)), IActionVerifier(address(wv))
+        );
     }
 
     function _a(string memory k) internal view returns (uint256) {
@@ -429,14 +433,223 @@ contract PrivateRedeemTest is Test {
 
     function test_bindEncryptedTotals_isIrreversible() public {
         vm.expectRevert(ShieldedPool.AlreadyBound.selector);
-        pool.bindEncryptedTotals(IEncryptedTotals(address(encrypted)), IActionVerifier(address(0xBEEF)));
+        pool.bindEncryptedTotals(
+            IEncryptedTotals(address(encrypted)), IActionVerifier(address(0xBEEF)), IActionVerifier(address(0xCAFE))
+        );
     }
 
     function test_bindEncryptedTotals_onlyAdmin() public {
         ShieldedPool fresh = _freshPool();
         vm.prank(makeAddr("stranger"));
         vm.expectRevert(ShieldedPool.NotAdmin.selector);
-        fresh.bindEncryptedTotals(IEncryptedTotals(address(encrypted)), IActionVerifier(address(0xBEEF)));
+        fresh.bindEncryptedTotals(
+            IEncryptedTotals(address(encrypted)), IActionVerifier(address(0xBEEF)), IActionVerifier(address(0xCAFE))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // WITHDRAW -- the exit, where collateral finally moves
+    // -----------------------------------------------------------------------
+
+    function _withdraw() internal {
+        pool.withdraw(
+            _pA("withdraw"),
+            _pB("withdraw"),
+            _pC("withdraw"),
+            _a(".withdraw.root"),
+            _a(".withdraw.nullifierHash"),
+            _a(".withdraw.changeCommitment"),
+            _a(".withdraw.withdrawData")
+        );
+    }
+
+    /// @dev Hoist every fixture read OUT of the measured region, then measure.
+    ///
+    ///      Extracted into its own function for two reasons: `vm.parseJson` costs ~450,000
+    ///      gas per call and must not land inside the bracket, and holding all seven proof
+    ///      components plus the surrounding assertions as locals in one test body exceeds
+    ///      the EVM stack under non-IR codegen (`via_ir` stays off so the gas figures in
+    ///      MEASUREMENTS.md remain comparable).
+    function _measuredWithdraw() internal returns (uint256 used) {
+        uint256[2] memory pA = _pA("withdraw");
+        uint256[2][2] memory pB = _pB("withdraw");
+        uint256[2] memory pC = _pC("withdraw");
+        uint256 root = _a(".withdraw.root");
+        uint256 nh = _a(".withdraw.nullifierHash");
+        uint256 cc = _a(".withdraw.changeCommitment");
+        uint256 data = _a(".withdraw.withdrawData");
+
+        uint256 g = gasleft();
+        pool.withdraw(pA, pB, pC, root, nh, cc, data);
+        used = g - gasleft();
+    }
+
+    /// @dev Redeem, then graft the settled note so it can be withdrawn.
+    function _runToWithdrawable() internal {
+        _runToSettled();
+        _redeemPrivate();
+        _flush(".batch6Real");
+        assertEq(tree.root(), _a(".rootAfterBatch6"), "root diverged from the mirror at batch 6");
+    }
+
+    /// @notice THE EXIT: a settled note becomes real USDC, partially, with change retained.
+    function test_withdraw_paysCollateralAndKeepsChangePrivate() public {
+        _runToWithdrawable();
+
+        address recipient = address(uint160(_a(".withdraw.recipient")));
+        uint256 amount = _a(".withdraw.amount");
+        uint256 before = usdc.balanceOf(recipient);
+        uint256 queuedBefore = pool.queuedCount();
+
+        uint256 used = _measuredWithdraw();
+
+        assertEq(usdc.balanceOf(recipient) - before, amount * DENOM, "recipient was not paid");
+        assertTrue(nullifiers.isSpent(_a(".withdraw.nullifierHash")), "settled note nullifier not burned");
+        assertEq(pool.queuedCount(), queuedBefore + 1, "change note not queued");
+        assertEq(
+            pool.pendingCommitments(queuedBefore),
+            _a(".withdraw.changeCommitment"),
+            "queued note is not the change note"
+        );
+
+        console.log("=== WITHDRAW ===");
+        console.log("note value (private, never on-chain) :", _a(".withdraw.privateNoteValue"));
+        console.log("amount out (PUBLIC -- money moves)   :", amount);
+        console.log("change     (private, stays a note)   :", _a(".withdraw.privateChange"));
+        console.log("gas                                  :", used);
+    }
+
+    /// @notice The full private path, and the numbers must reconcile at every hop.
+    /// @dev 137 staked across two hidden bets -> 100 payout for this position -> 60 out, 40
+    ///      held. Only the 60 and the recipient were ever public.
+    function test_fullPrivatePath_reconciles() public {
+        _runToWithdrawable();
+        _withdraw();
+
+        uint256 noteValue = _a(".withdraw.privateNoteValue");
+        uint256 amount = _a(".withdraw.amount");
+        uint256 change = _a(".withdraw.privateChange");
+
+        assertEq(amount + change, noteValue, "conservation broken across the exit");
+        assertEq(noteValue, _a(".redeemPrivate.privatePayout"), "withdrawn note is not the redeemed payout");
+    }
+
+    function test_withdraw_isOneShot() public {
+        _runToWithdrawable();
+        _withdraw();
+
+        vm.expectRevert(ShieldedPool.NullifierAlreadySpent.selector);
+        _withdraw();
+    }
+
+    /// @notice The pool must actually hold the collateral it pays out.
+    /// @dev Solvency by construction: every deposit created a complete set, and settled notes
+    ///      sum to exactly the deposited total (staked payouts plus unbet refunds). If that
+    ///      ever stopped holding, this is where it would surface -- `Vault.redeem` would
+    ///      revert on an insufficient position rather than silently underpay.
+    function test_withdraw_poolRemainsSolvent() public {
+        _runToWithdrawable();
+
+        uint256 heldBefore = encryptedVault.yesBalance(address(pool));
+        uint256 amount = _a(".withdraw.amount");
+        assertGe(heldBefore, amount, "pool does not hold enough winning tokens to pay");
+
+        _withdraw();
+
+        assertEq(
+            encryptedVault.yesBalance(address(pool)),
+            heldBefore - amount,
+            "vault position did not decrease by the amount paid"
+        );
+        assertEq(
+            usdc.balanceOf(address(encryptedVault)),
+            encryptedVault.collateralHeld(),
+            "vault accounting drifted from its actual balance"
+        );
+    }
+
+    /// @notice A plaintext market cannot be withdrawn from.
+    function test_withdraw_rejectsPlaintextMarket() public {
+        _runToWithdrawable();
+
+        uint256 data = _a(".withdraw.withdrawData");
+        // Rewrite marketId (bits 200+) from 8 to 7.
+        uint256 plaintext = (data & ((uint256(1) << 200) - 1)) | (uint256(MARKET_ID) << 200);
+
+        vm.expectRevert(ShieldedPool.WrongActionForMarket.selector);
+        pool.withdraw(
+            _pA("withdraw"),
+            _pB("withdraw"),
+            _pC("withdraw"),
+            _a(".withdraw.root"),
+            _a(".withdraw.nullifierHash"),
+            _a(".withdraw.changeCommitment"),
+            plaintext
+        );
+    }
+
+    /// @notice Before settlement, a withdrawal cannot even reference a valid root.
+    ///
+    /// @dev The `NotSettled2` branch inside `_checkWithdrawable` is deliberately
+    ///      UNREACHABLE and is defence in depth, not live logic. A withdrawable note is a
+    ///      SETTLED note, a SETTLED note only comes from `redeemPrivate`, and
+    ///      `redeemPrivate` already requires settlement -- so no withdrawable note can exist
+    ///      before the market settles.
+    ///
+    ///      What IS reachable, and what this asserts, is `UnknownRoot`: the note has not been
+    ///      grafted, so the root the proof was built against does not exist on-chain.
+    ///
+    ///      Written this way deliberately. An earlier version expected `NotSettled2` and
+    ///      "passed" only because `UnknownRoot` fired first -- proving nothing about
+    ///      settlement while appearing to. The identical trap caught `redeemPrivate` earlier
+    ///      in this file.
+    function test_withdraw_revertsBeforeItsNoteIsGrafted() public {
+        _runToResolvedButUnsettled();
+
+        vm.expectRevert(ShieldedPool.UnknownRoot.selector);
+        _withdraw();
+    }
+
+    /// @notice Swapping the recipient invalidates the proof.
+    /// @dev The mempool-theft case. `recipient` is bound inside the proof, so lifting a valid
+    ///      proof and redirecting the payment cannot work.
+    function test_withdraw_rejectsSwappedRecipient() public {
+        _runToWithdrawable();
+
+        uint256 data = _a(".withdraw.withdrawData");
+        // Clear the recipient field (bits 40..199) and substitute a thief.
+        uint256 mask = ((uint256(1) << 160) - 1) << 40;
+        uint256 stolen = (data & ~mask) | (uint256(uint160(makeAddr("thief"))) << 40);
+
+        vm.expectRevert(ShieldedPool.InvalidProof.selector);
+        pool.withdraw(
+            _pA("withdraw"),
+            _pB("withdraw"),
+            _pC("withdraw"),
+            _a(".withdraw.root"),
+            _a(".withdraw.nullifierHash"),
+            _a(".withdraw.changeCommitment"),
+            stolen
+        );
+    }
+
+    /// @notice Inflating the amount invalidates the proof.
+    function test_withdraw_rejectsInflatedAmount() public {
+        _runToWithdrawable();
+
+        uint256 data = _a(".withdraw.withdrawData");
+        uint256 inflated = (data & ~((uint256(1) << 40) - 1)) | 1000;
+
+        vm.expectRevert(ShieldedPool.InvalidProof.selector);
+        pool.withdraw(
+            _pA("withdraw"),
+            _pB("withdraw"),
+            _pC("withdraw"),
+            _a(".withdraw.root"),
+            _a(".withdraw.nullifierHash"),
+            _a(".withdraw.changeCommitment"),
+            inflated
+        );
     }
 
     function _freshPool() internal returns (ShieldedPool) {
