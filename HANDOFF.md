@@ -17,7 +17,7 @@ Groth16 proof.
 |---|---|---|
 | **0** — kill the risk | Vault skeleton, ElGamal circuit, real gas measurement | **complete, gate passed** |
 | **1** — market, public pools | Vault, ShieldedPool, 3 circuits, parimutuel, sequencer, CI | **complete, 1 critical fixed** |
-| **2** — encrypted pools | Accumulator, `Enc(m)` in-circuit, private redeem, publisher | **~40%** — three components built and verified, **none wired** |
+| **2** — encrypted pools | Accumulator, `Enc(m)` in-circuit, private redeem, publisher | **~70%** — encrypted bet + settlement wired and **exercised on testnet**; private redeem, withdraw and publisher still unbuilt |
 | **3** — product | Frontend, resolver, seeded markets, threshold committee | not started |
 
 **145 Solidity tests + 29 circuit soundness attacks + 155 curve vectors + 13 sequencer tests**
@@ -47,16 +47,38 @@ Three components are built and verified in isolation. **Nothing is wired togethe
 remaining work is mostly integration — which is where the one critical bug of Phase 1 came
 from, so that distinction is load-bearing rather than pedantic.
 
+**UPDATED 31 July 2026.** The table below has moved substantially: the encrypted bet
+path is now wired, measured, and exercised on Monad testnet. See
+[`PHASE2_TESTNET_REPORT.md`](PHASE2_TESTNET_REPORT.md) for the transaction record.
+
 | Piece | Built | Verified | Wired |
 |---|---|---|---|
-| `ElGamalAccumulator` + `BabyJubJub` | yes | 19 tests vs circomlibjs, gate measured | **no** |
-| `bet_encrypted.circom` | yes | 29 soundness attacks | **no** |
-| `ChaumPedersen` (DLEQ decryption proof) | yes | 13 tests, optimised 3.06x | **no** |
+| `ElGamalAccumulator` + `BabyJubJub` | yes | 19 tests, gate measured, **homomorphic sum proven on testnet** | **yes** |
+| `bet_encrypted.circom` | yes | 29 soundness attacks, **real proof, 21,252 constraints, ptau 15** | **yes** |
+| `ChaumPedersen` (DLEQ decryption proof) | yes | 13 tests, optimised 3.06x | **yes**, via `EncryptedParimutuelPool` |
+| `EncryptedParimutuelPool` + plaintext binding | yes | 15 tests, **attack reverted on testnet** | **yes** |
 | Single disclosed committee key | yes | generated circom include, cannot drift from the key file | n/a |
+| `ShieldedPool` Phase 2 path (`betEncrypted`) | yes | 8 tests, **1,904,506 gas on testnet, 95.2% of envelope** | **yes** |
 | Private redeem | **no** | — | — |
 | Withdraw circuit | **no** | — | — |
-| Publisher (cadence, BSGS, ratio) | **no** | BSGS exists only inside `prove.mjs` | — |
-| `ShieldedPool` Phase 2 path | **no** | — | — |
+| Publisher (cadence, BSGS, ratio) | **no** | BSGS + DLEQ now extracted to `circuits/scripts/lib/`, exercised, but no worker | — |
+
+Test count is now **168 Solidity tests** (was 145), plus 13 sequencer tests.
+
+### The correction this phase produced
+
+**Chaum-Pedersen alone does not stop a lying publisher.** It proves the decryption
+share came from the committee key; it says nothing about the integer claimed alongside
+it. Binding the claim needs `C2 - D = [m]G` checked separately. Demonstrated on-chain:
+a claim of 1275 against a true 425 reverted with `ClaimedPlaintextMismatch`, **not**
+`InvalidDecryptionProof` — the proof was valid. §V6 of the reference and this document
+both previously implied the proof was sufficient.
+
+**A mid-market ratio cannot be verified on-chain at all.** Verifying it consumes the
+plaintext totals, and publishing those defeats the phase; additive ElGamal has no
+division. Mid-market odds are therefore an operator attestation
+(`publishAttestedRatio`, rate-limited on-chain), and no payout reads it. Only
+`publishFinalTotals` is verified, and only it feeds settlement.
 
 ### Gaps inside what looks finished
 

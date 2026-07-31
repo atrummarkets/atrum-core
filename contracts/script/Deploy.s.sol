@@ -7,10 +7,13 @@ import {IERC20} from "../src/interfaces/IERC20.sol";
 import {IncrementalMerkleTree, IPoseidonT3} from "../src/IncrementalMerkleTree.sol";
 import {MappingNullifierSet} from "../src/MappingNullifierSet.sol";
 import {ParimutuelPool} from "../src/ParimutuelPool.sol";
-import {ShieldedPool, IDepositVerifier, IActionVerifier} from "../src/ShieldedPool.sol";
+import {ShieldedPool, IDepositVerifier, IActionVerifier, IActionVerifier8} from "../src/ShieldedPool.sol";
+import {ElGamalAccumulator} from "../src/ElGamalAccumulator.sol";
+import {EncryptedParimutuelPool} from "../src/EncryptedParimutuelPool.sol";
 import {DepositVerifier} from "../src/verifiers/DepositVerifier.sol";
 import {BetVerifier} from "../src/verifiers/BetVerifier.sol";
 import {RedeemVerifier} from "../src/verifiers/RedeemVerifier.sol";
+import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
 import {MockERC20} from "../test/mocks/MockERC20.sol";
 
 /// @notice Deploy the Phase 1 stack.
@@ -29,7 +32,25 @@ contract Deploy is Script {
         % 21888242871839275222246405745257275088548364400416034343698204186575808495617;
 
     uint32 constant MARKET_ID = 7;
+
+    /// @dev A second market on the Phase 2 path, so a deployment exercises both. Its own
+    ///      Vault, not a shared one: a Vault owns its collateral and its resolution, and
+    ///      pointing two markets at one would double-count both.
+    uint32 constant ENCRYPTED_MARKET_ID = 8;
+
     uint256 constant DENOM = 1e6;
+
+    /// @dev The disclosed committee key, from `circuits/build/committee-key.json`. Phase 2
+    ///      ships a single key in the open -- the privacy claim rests on the ciphertext,
+    ///      not on hiding whose key it is.
+    ///
+    ///      TEST KEY. Its secret sits in a gitignored file on a developer machine, so it
+    ///      protects nothing. A real deployment needs a key from a real ceremony.
+    uint256 constant COMMITTEE_KEY_X = 14545821346199784731385379243674827736685806786607247717851455121430969226259;
+    uint256 constant COMMITTEE_KEY_Y = 4655410101393361897096692429781085479578088917846952746595496973362008687944;
+
+    /// @dev Odds are published hourly, never continuously -- see the contract's notice.
+    uint256 constant MIN_PUBLISH_INTERVAL = 1 hours;
 
     /// @dev Grouped so `run` stays inside the stack limit without `via_ir`. Turning IR
     ///      on would shift every gas figure in MEASUREMENTS.md, and those numbers are
@@ -38,11 +59,15 @@ contract Deploy is Script {
         address poseidon;
         address collateral;
         address vault;
+        address encryptedVault;
         address depositVerifier;
         address betVerifier;
         address redeemVerifier;
+        address betEncryptedVerifier;
         address tree;
         address parimutuel;
+        address accumulator;
+        address encryptedParimutuel;
         address nullifiers;
         address pool;
     }
@@ -61,10 +86,12 @@ contract Deploy is Script {
         d.poseidon = _deployPoseidon();
         d.collateral = _deployCollateral(deployer);
         d.vault = _deployVault(d.collateral, deployer);
+        d.encryptedVault = _deployVault(d.collateral, deployer);
 
         d.depositVerifier = address(new DepositVerifier());
         d.betVerifier = address(new BetVerifier());
         d.redeemVerifier = address(new RedeemVerifier());
+        d.betEncryptedVerifier = address(new BetEncryptedVerifier());
 
         _deployPool(d, deployer, sequencer);
 
@@ -94,22 +121,30 @@ contract Deploy is Script {
     }
 
     function _deployPool(Deployed memory d, address deployer, address sequencer) internal {
-        // The pool's address is needed by the tree and the parimutuel pool, which are
-        // constructed before it. Predicting keeps both roles immutable rather than
-        // leaving a standing setter over the anonymity set.
-        address predicted = vm.computeCreateAddress(deployer, vm.getNonce(deployer) + 3);
+        // The pool's address is needed by the tree, the parimutuel pool and the
+        // accumulator, all of which are constructed before it. Predicting keeps every one
+        // of those roles immutable rather than leaving a standing setter over the
+        // anonymity set.
+        //
+        // The offset counts the deploys between here and the pool -- tree, parimutuel,
+        // nullifiers, accumulator -- so adding a contract to that list means bumping it.
+        // The `require` below is what catches a stale count.
+        address predicted = vm.computeCreateAddress(deployer, vm.getNonce(deployer) + 4);
 
         d.tree = address(new IncrementalMerkleTree(IPoseidonT3(d.poseidon), ZERO_VALUE, predicted));
         d.parimutuel = address(new ParimutuelPool(predicted));
         d.nullifiers = address(new MappingNullifierSet());
+        d.accumulator = address(new ElGamalAccumulator(predicted));
 
         ShieldedPool pool = new ShieldedPool(
             IncrementalMerkleTree(d.tree),
             MappingNullifierSet(d.nullifiers),
             ParimutuelPool(d.parimutuel),
+            ElGamalAccumulator(d.accumulator),
             IDepositVerifier(d.depositVerifier),
             IActionVerifier(d.betVerifier),
             IActionVerifier(d.redeemVerifier),
+            IActionVerifier8(d.betEncryptedVerifier),
             sequencer,
             deployer
         );
@@ -117,18 +152,35 @@ contract Deploy is Script {
         d.pool = address(pool);
 
         MappingNullifierSet(d.nullifiers).bindPool(d.pool);
+
+        // Both modes, so a deployment exercises the Phase 1 and Phase 2 paths side by
+        // side. `registerEncryptedMarket` also initialises the accumulator to Enc(0) for
+        // both outcomes -- see its notice for why that is not left to a separate call.
         pool.registerMarket(MARKET_ID, Vault(d.vault));
+        pool.registerEncryptedMarket(ENCRYPTED_MARKET_ID, Vault(d.encryptedVault));
+
+        // Settlement reads from here, and only from here. Deployed after the pool because
+        // it takes the pool's real address rather than a predicted one.
+        d.encryptedParimutuel = address(
+            new EncryptedParimutuelPool(
+                ElGamalAccumulator(d.accumulator), pool, COMMITTEE_KEY_X, COMMITTEE_KEY_Y, MIN_PUBLISH_INTERVAL
+            )
+        );
     }
 
     function _report(Deployed memory d) internal view {
         console.log("PoseidonT3           :", d.poseidon);
         console.log("Collateral (mock)    :", d.collateral);
-        console.log("Vault                :", d.vault);
+        console.log("Vault (plaintext)    :", d.vault);
+        console.log("Vault (encrypted)    :", d.encryptedVault);
         console.log("DepositVerifier      :", d.depositVerifier);
         console.log("BetVerifier          :", d.betVerifier);
         console.log("RedeemVerifier       :", d.redeemVerifier);
+        console.log("BetEncryptedVerifier :", d.betEncryptedVerifier);
         console.log("IncrementalMerkleTree:", d.tree);
         console.log("ParimutuelPool       :", d.parimutuel);
+        console.log("ElGamalAccumulator   :", d.accumulator);
+        console.log("EncryptedParimutuel  :", d.encryptedParimutuel);
         console.log("MappingNullifierSet  :", d.nullifiers);
         console.log("ShieldedPool         :", d.pool);
         console.log("initial root         :", IncrementalMerkleTree(d.tree).root());

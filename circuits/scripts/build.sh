@@ -26,6 +26,15 @@ BUILD=build
 # action circuits do not fit there -- a depth-20 Merkle path costs ~4,900 constraints
 # on its own, putting `bet` at 14,194 and `redeem` at 12,734 against power 13's ceiling
 # of 8,192. Those two need power 14 (16,384).
+#
+# Phase 2's `bet_encrypted` proves an ElGamal encryption in-circuit on top of the same
+# Merkle path, at 21,250 constraints. That clears power 14's 16,384 ceiling, so it takes
+# power 15 (32,768) -- the first circuit here that needs it.
+#
+# PROVENANCE IS UNVERIFIED FOR EVERY POWER USED HERE. `snarkjs powersoftau verify` has
+# not been run to completion on any of these files (MEASUREMENTS.md §6). Setup succeeds
+# against the published Hermez files, but nothing here has checked the ceremony
+# transcript. Verify before anything holds value.
 fetch_ptau() {
     local power="$1"
     local ptau="$BUILD/powersOfTau28_hez_final_${power}.ptau"
@@ -56,6 +65,7 @@ CIRCUITS=(
     deposit:13
     bet:14
     redeem:14
+    bet_encrypted:15
 )
 
 for entry in "${CIRCUITS[@]}"; do

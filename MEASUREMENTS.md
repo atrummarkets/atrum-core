@@ -1,4 +1,4 @@
-# Atrum — measurements, Phase 0 and Phase 1
+# Atrum — measurements, Phase 0 to Phase 2
 
 Everything here was measured by this repo's own tooling against **live Monad nodes**
 on 30 July 2026, not copied from `nisi-master-reference.md`. Where our number
@@ -285,6 +285,105 @@ hour between betting close and resolution — deliberately, so a last-second bet
 front-run an already determined outcome — and there is no way to skip that on a live
 chain. It is covered locally by `test_fullLifecycle_depositBetResolveRedeem`, and its
 verifier is measured in §1.
+
+## 1e. Phase 2 — the encrypted bet, wired and measured [MEASURED]
+
+`bet_encrypted.circom` existed since 30 July but had **never produced a real proof**: it
+required a powers-of-tau file of power 15 and only 13 and 14 were present, so there was
+no zkey, no verifier, and the 8-public-signal verify cost was an extrapolation. It is now
+compiled, proved, wired into `ShieldedPool.betEncrypted`, and measured.
+
+Reproduce: `make circuits && make fixtures && make verifiers && make test && make gate`
+
+### Circuit
+
+| | |
+|---|---|
+| Constraints | **21,252** (HANDOFF estimated 21,250) |
+| Public signals | **8** — `root, nullifierHash, newCommitment, betMeta, c1[2], c2[2]` |
+| ptau power | **15** (32,768 ceiling, ~65% utilised) |
+
+Power 14 was not an option: 21,252 clears its 16,384 ceiling. `bet_encrypted` is now in
+`circuits/scripts/build.sh`'s pipeline, so `make circuits` builds it like any other.
+
+### [MEASURED] The 8-signal verify — the number that was an extrapolation
+
+| Verifier | signals | warm | cold first call | % of 1.5M gate |
+|---|---|---|---|---|
+| `BetEncryptedVerifier` | 8 | **1,152,559** | **1,162,809** | 76.8% — **PASS** |
+| `BetVerifier` | 4 | 1,029,454 | 1,039,706 | 68.6% |
+
+**Confirms the extrapolation almost exactly.** `HANDOFF.md` predicted ~1,155,000 against
+a measured 1,152,559 warm. The four extra signals cost **123,105 gas — 30,776 each**,
+a third independent confirmation of the ~30,756 per-signal figure.
+
+`ActionGasPolicy.MAX_MEASURED_VERIFY_GAS` moved from 1,101,216 to **1,162,809**, the new
+worst cold verify. The CI uniformity guard caught the stale constant on the first run
+rather than needing anyone to remember — it is wired to fail exactly this way.
+
+### [MEASURED] The wired action, locally
+
+| Action | `forge --network monad` | Δ vs plaintext `bet` |
+|---|---|---|
+| `bet` (Phase 1) | 1,173,880 | — |
+| `betEncrypted` (Phase 2) | **1,352,807** | **+178,927** |
+
+The delta decomposes as verify (+123,105) plus the affine accumulator (~122,000 cold)
+minus the `parimutuel.addStake` the encrypted path no longer performs. That is
+consistent with the accumulator's own standalone gate figure of 122,270 cold.
+
+**The accumulator slots really are cold here**, which is the measurement mistake §1d
+records making once already: `registerEncryptedMarket` writes them in `setUp`, so the
+test body is a fresh transaction, and nothing in the plaintext lifecycle preceding it
+touches the accumulator.
+
+### [MEASURED] It fits on a real transaction — the gate is now closed
+
+Broadcast on Monad testnet on 31 July 2026. Full transaction record with explorer
+links: [`PHASE2_TESTNET_REPORT.md`](PHASE2_TESTNET_REPORT.md).
+
+| Action | local `forge` | **live testnet** | Δ | % of 2,000,000 |
+|---|---|---|---|---|
+| `deposit` | 1,378,641 | 1,816,159 | +32% | 91% |
+| `bet` | 1,173,880 | 1,644,303 | +40% | 82% |
+| **`betEncrypted` (cold accumulator)** | 1,352,807 | **1,904,506** | **+41%** | **95.2%** |
+| `betEncrypted` (warm accumulator) | — | 1,859,677 | — | 93.0% |
+
+**It fits, with 95,494 gas to spare.** The envelope stays at 2,000,000.
+
+The estimates written here before broadcasting were 1,825,000 (additive) and 1,883,000
+(multiplicative), i.e. 91–94%. The real figure is 1,904,506 — **both estimates erred
+optimistically**, the same direction as the 437,390-gas error §1c records. Local
+reasoning about this chain's costs keeps landing short; only broadcasting settles it.
+
+`deposit` reproduced at 1,816,159 against the 1,816,031 measured on the previous
+deployment — 128 gas apart, which is a useful check that the methodology is stable.
+
+One correction worth recording: `HANDOFF.md` §7.1's stated fallback — "if the
+accumulator does not fit, move `Vault.split` out of `deposit`" — **does not apply to
+this action.** `betEncrypted` never calls `Vault.split`; that cost belongs to `deposit`.
+Had the number landed over budget, the stated fallback would not have helped, and the
+obvious alternative is already ruled out: hashing the ciphertext to save 3 public
+signals (~92,000) costs ~87,000 in on-chain Poseidon, a wash. Worth keeping in mind at
+95.2% utilisation — there is no cheap lever in reserve for this action.
+
+### [MEASURED] Settlement, and a check neither source document specifies
+
+`publishFinalTotals` costs **2,410,578** gas on testnet — two Chaum-Pedersen verifies
+plus two plaintext bindings, once per market at settlement. It is above the 2,000,000
+action envelope and correctly so: it is a public publisher transaction, not a shielded
+action, so the anti-fingerprinting uniformity rule does not apply to it.
+
+**Chaum-Pedersen alone does not bind a claimed total to a ciphertext.** It proves the
+decryption share came from the committee key and nothing more. A publisher can pair an
+honest share and a valid proof with a fabricated total. Demonstrated on-chain: a claim
+of 1275 against a true 425 reverted with `ClaimedPlaintextMismatch` (`0x3923e9b5`),
+**not** `InvalidDecryptionProof` — the proof verified; only the `C2 - D = [m]G` binding
+caught it. With the binding removed in a local mutation test, the same input settles
+the market at 1275.
+
+`nisi-master-reference.md` §V6 and `HANDOFF.md` both treat the decryption proof as
+sufficient. It is not, and the gap is silent.
 
 ### [DECIDED] Nullifiers — mapping, and not only on gas
 

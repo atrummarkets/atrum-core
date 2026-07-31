@@ -36,12 +36,18 @@ import {
   derivedFiller,
   FIELD_SIZE,
 } from "./atrum.mjs";
+import { buildElGamal } from "./lib/elgamal.mjs";
 
 const BUILD = new URL("../build/", import.meta.url);
 const OUT = new URL("../build/action-fixtures.json", import.meta.url);
 
 const BATCH_SIZE = 64;
 const MARKET_ID = 7n;
+
+/// A market registered on the Phase 2 path. Distinct from MARKET_ID because a market's
+/// total lives either in ParimutuelPool or in ElGamalAccumulator, never both.
+const ENCRYPTED_MARKET_ID = 8n;
+
 const UNITS = 100n;
 
 /** Uniform field element. */
@@ -195,6 +201,7 @@ async function main() {
     betData: betData.toString(),
   };
 
+
   // -------------------------------------------------------------------------
   // 4. Sequencer grafts batch 2, carrying the position note.
   // -------------------------------------------------------------------------
@@ -260,7 +267,253 @@ async function main() {
   };
 
   // -------------------------------------------------------------------------
-  // 6. Negative fixture: a bet proof for a note that was never deposited.
+  // 6. PHASE 2 -- deposit into an ENCRYPTED market, then bet with the stake hidden
+  // -------------------------------------------------------------------------
+  // A separate market with its own batch, deliberately appended after the Phase 1
+  // lifecycle rather than woven into it. A market's pool total lives EITHER in
+  // `ParimutuelPool` (plaintext) or in `ElGamalAccumulator` (ciphertext), never both,
+  // so the encrypted bet cannot reuse market 7 -- and `marketId` is bound inside the
+  // note commitment, so it cannot reuse market 7's note either.
+  //
+  // Appending also keeps `rootAfterBatch1`/`rootAfterBatch2` byte-identical, so every
+  // existing Phase 1 test keeps replaying against the roots it was written for.
+  const encDepositNote = {
+    nullifier: randomField(),
+    secret: randomField(),
+    marketId: ENCRYPTED_MARKET_ID,
+    outcome: OUTCOME_UNBET,
+    units: UNITS,
+  };
+  const encDepositCommitment = noteCommitment(encDepositNote);
+
+  const encDepositProof = await prove("deposit", {
+    commitment: encDepositCommitment,
+    marketId: ENCRYPTED_MARKET_ID,
+    units: UNITS,
+    nullifier: encDepositNote.nullifier,
+    secret: encDepositNote.secret,
+  }, { emitCalldata: false });
+
+  fixtures.encryptedMarketId = ENCRYPTED_MARKET_ID.toString();
+  fixtures.depositEncrypted = {
+    ...encDepositProof,
+    commitment: encDepositCommitment.toString(),
+    units: UNITS.toString(),
+  };
+
+  const batch3 = [encDepositCommitment];
+  while (batch3.length < BATCH_SIZE) {
+    batch3.push(derivedFiller(2 * BATCH_SIZE, batch3.length));
+  }
+  for (const leaf of batch3) tree.insert(leaf);
+
+  const rootAfterBatch3 = tree.root();
+  const encDepositPath = tree.path(2 * BATCH_SIZE);
+
+  fixtures.batch3 = batch3.map((x) => x.toString());
+  fixtures.batch3Real = [encDepositCommitment.toString()];
+  fixtures.rootAfterBatch3 = rootAfterBatch3.toString();
+
+  // The committee key encrypts the stake. Only the PUBLIC half is needed to encrypt --
+  // the secret is read here purely to prove the ciphertext decrypts back to the stake,
+  // which is the property the accumulator's correctness rests on.
+  const key = JSON.parse(readFileSync(new URL("committee-key.json", BUILD), "utf8"));
+  const elgamal = await buildElGamal(key.pubKey, key.secret);
+
+  const encRandomness = elgamal.randomScalar();
+  const cipher = elgamal.encrypt(UNITS, encRandomness);
+  const [c1x, c1y] = elgamal.asPair(cipher.c1);
+  const [c2x, c2y] = elgamal.asPair(cipher.c2);
+
+  const encPositionNote = {
+    nullifier: randomField(),
+    secret: randomField(),
+    marketId: ENCRYPTED_MARKET_ID,
+    outcome: OUTCOME_YES,
+    units: UNITS,
+  };
+  const encPositionCommitment = noteCommitment(encPositionNote);
+  const encBetNullifierHash = nullifierHash(encDepositNote.nullifier);
+
+  // Note the packing change from Phase 1: `betData` carried units, `betMeta` cannot.
+  // Publishing the stake in a public signal is exactly what this circuit exists to stop.
+  const betMeta = packMarketMeta(ENCRYPTED_MARKET_ID, OUTCOME_YES);
+
+  const betEncryptedProof = await prove("bet_encrypted", {
+    root: rootAfterBatch3,
+    nullifierHash: encBetNullifierHash,
+    newCommitment: encPositionCommitment,
+    betMeta,
+    c1: [c1x, c1y],
+    c2: [c2x, c2y],
+    nullifier: encDepositNote.nullifier,
+    secret: encDepositNote.secret,
+    newNullifier: encPositionNote.nullifier,
+    newSecret: encPositionNote.secret,
+    marketId: ENCRYPTED_MARKET_ID,
+    outcome: OUTCOME_YES,
+    units: UNITS,
+    encRandomness,
+    pathElements: encDepositPath.pathElements,
+    pathIndices: encDepositPath.pathIndices,
+  });
+
+  const encSignals = betEncryptedProof.publicSignals.map(BigInt);
+  assert(encSignals.length === 8, "bet_encrypted: expected 8 public signals");
+  assert(encSignals[0] === rootAfterBatch3, "bet_encrypted signal[0] != root");
+  assert(encSignals[1] === encBetNullifierHash, "bet_encrypted signal[1] != nullifierHash");
+  assert(encSignals[2] === encPositionCommitment, "bet_encrypted signal[2] != newCommitment");
+  assert(encSignals[3] === betMeta, "bet_encrypted signal[3] != betMeta");
+  assert(encSignals[4] === c1x, "bet_encrypted signal[4] != c1.x");
+  assert(encSignals[5] === c1y, "bet_encrypted signal[5] != c1.y");
+  assert(encSignals[6] === c2x, "bet_encrypted signal[6] != c2.x");
+  assert(encSignals[7] === c2y, "bet_encrypted signal[7] != c2.y");
+
+  // None of the 8 public signals may be the stake. The whole point of Phase 2 is that
+  // `units` stopped being one of them, and an accidental re-widening of the public
+  // signal list would be invisible to `snarkjs verify`.
+  for (let i = 0; i < encSignals.length; i++) {
+    assert(encSignals[i] !== UNITS, `bet_encrypted signal[${i}] leaks the plaintext stake`);
+  }
+
+  // The consistency constraint is the load-bearing part of this circuit, so check it
+  // the way `prove.mjs` checks the probes: decrypt what the circuit actually published
+  // and confirm it is the stake inside the note that was spent. A proof verifying says
+  // a witness satisfied the constraints -- it does not say the ciphertext encrypts the
+  // amount we think, and that is the exact failure a malicious prover would exploit.
+  assert(
+    elgamal.decrypt(cipher.c1, cipher.c2, 1000n) === UNITS,
+    "bet_encrypted: published ciphertext does not decrypt to the staked units",
+  );
+
+  fixtures.betEncrypted = {
+    ...betEncryptedProof,
+    root: rootAfterBatch3.toString(),
+    nullifierHash: encBetNullifierHash.toString(),
+    newCommitment: encPositionCommitment.toString(),
+    betMeta: betMeta.toString(),
+    ciphertext: [c1x.toString(), c1y.toString(), c2x.toString(), c2y.toString()],
+    // The plaintext stake, so tests can assert the contract never receives it.
+    units: UNITS.toString(),
+  };
+
+  // -------------------------------------------------------------------------
+  // 6b. A SECOND encrypted bet -- so the homomorphic property can be shown on-chain
+  // -------------------------------------------------------------------------
+  // One encrypted bet proves the ciphertext is accepted. Two prove the thing the whole
+  // architecture rests on: that the contract can TOTAL them without decrypting. After
+  // this bet the accumulator holds Enc(UNITS) + Enc(SECOND_UNITS), and only someone
+  // with the committee key can tell that it means UNITS + SECOND_UNITS.
+  //
+  // A different stake from the first, deliberately: with two equal stakes a broken
+  // accumulator that simply doubled one input would produce the same answer.
+  const SECOND_UNITS = 37n;
+
+  const encDepositNote2 = {
+    nullifier: randomField(),
+    secret: randomField(),
+    marketId: ENCRYPTED_MARKET_ID,
+    outcome: OUTCOME_UNBET,
+    units: SECOND_UNITS,
+  };
+  const encDepositCommitment2 = noteCommitment(encDepositNote2);
+
+  const encDepositProof2 = await prove("deposit", {
+    commitment: encDepositCommitment2,
+    marketId: ENCRYPTED_MARKET_ID,
+    units: SECOND_UNITS,
+    nullifier: encDepositNote2.nullifier,
+    secret: encDepositNote2.secret,
+  }, { emitCalldata: false });
+
+  fixtures.depositEncrypted2 = {
+    ...encDepositProof2,
+    commitment: encDepositCommitment2.toString(),
+    units: SECOND_UNITS.toString(),
+  };
+
+  // Batch 4 carries TWO real leaves, in queue order: the position note the first
+  // encrypted bet created, then this second deposit. The first bet's commitment was
+  // queued and not yet grafted, and `flushBatch` consumes the queue strictly in order --
+  // so the mirror has to graft it here or the on-chain root diverges from every Merkle
+  // path built after this point.
+  const batch4 = [encPositionCommitment, encDepositCommitment2];
+  while (batch4.length < BATCH_SIZE) {
+    batch4.push(derivedFiller(3 * BATCH_SIZE, batch4.length));
+  }
+  for (const leaf of batch4) tree.insert(leaf);
+
+  const rootAfterBatch4 = tree.root();
+  const encDepositPath2 = tree.path(3 * BATCH_SIZE + 1);
+
+  fixtures.batch4 = batch4.map((x) => x.toString());
+  fixtures.batch4Real = [encPositionCommitment.toString(), encDepositCommitment2.toString()];
+  fixtures.rootAfterBatch4 = rootAfterBatch4.toString();
+
+  const encRandomness2 = elgamal.randomScalar();
+  const cipher2 = elgamal.encrypt(SECOND_UNITS, encRandomness2);
+  const [c1x2, c1y2] = elgamal.asPair(cipher2.c1);
+  const [c2x2, c2y2] = elgamal.asPair(cipher2.c2);
+
+  const encPositionNote2 = {
+    nullifier: randomField(),
+    secret: randomField(),
+    marketId: ENCRYPTED_MARKET_ID,
+    outcome: OUTCOME_YES,
+    units: SECOND_UNITS,
+  };
+  const encPositionCommitment2 = noteCommitment(encPositionNote2);
+  const encBetNullifierHash2 = nullifierHash(encDepositNote2.nullifier);
+
+  const betEncryptedProof2 = await prove("bet_encrypted", {
+    root: rootAfterBatch4,
+    nullifierHash: encBetNullifierHash2,
+    newCommitment: encPositionCommitment2,
+    betMeta,
+    c1: [c1x2, c1y2],
+    c2: [c2x2, c2y2],
+    nullifier: encDepositNote2.nullifier,
+    secret: encDepositNote2.secret,
+    newNullifier: encPositionNote2.nullifier,
+    newSecret: encPositionNote2.secret,
+    marketId: ENCRYPTED_MARKET_ID,
+    outcome: OUTCOME_YES,
+    units: SECOND_UNITS,
+    encRandomness: encRandomness2,
+    pathElements: encDepositPath2.pathElements,
+    pathIndices: encDepositPath2.pathIndices,
+  }, { emitCalldata: false });
+
+  // The expected accumulator state after BOTH bets, computed the way the contract will
+  // compute it: ciphertext addition, no decryption. The on-chain value must equal this
+  // exactly, and it must decrypt to the sum of the two stakes.
+  const summed = elgamal.addCiphertext(cipher, cipher2);
+  const [sumC1x, sumC1y] = elgamal.asPair(summed.c1);
+  const [sumC2x, sumC2y] = elgamal.asPair(summed.c2);
+
+  assert(
+    elgamal.decrypt(summed.c1, summed.c2, 10_000n) === UNITS + SECOND_UNITS,
+    "homomorphic sum does not decrypt to the sum of the two stakes",
+  );
+
+  fixtures.betEncrypted2 = {
+    ...betEncryptedProof2,
+    root: rootAfterBatch4.toString(),
+    nullifierHash: encBetNullifierHash2.toString(),
+    newCommitment: encPositionCommitment2.toString(),
+    betMeta: betMeta.toString(),
+    ciphertext: [c1x2.toString(), c1y2.toString(), c2x2.toString(), c2y2.toString()],
+    units: SECOND_UNITS.toString(),
+  };
+
+  fixtures.accumulatorAfterBothBets = {
+    ciphertext: [sumC1x.toString(), sumC1y.toString(), sumC2x.toString(), sumC2y.toString()],
+    decryptsTo: (UNITS + SECOND_UNITS).toString(),
+    fromStakes: [UNITS.toString(), SECOND_UNITS.toString()],
+  };
+
+  // -------------------------------------------------------------------------
+  // 7. Negative fixture: a bet proof for a note that was never deposited.
   //    The contract must reject it, and the only thing standing in the way is the
   //    Merkle constraint -- worth having a real counterexample rather than trusting it.
   // -------------------------------------------------------------------------

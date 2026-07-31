@@ -30,18 +30,26 @@ library ActionGasPolicy {
     /// @notice Uniform declared gas limit for every shielded action.
     ///
     /// @dev Derived from measurement, not guessed. Our worst measured verify is
-    ///      1,101,216 gas for a 6-public-signal verifier on live Monad
-    ///      (MEASUREMENTS.md §1). On top of verification an action also pays:
+    ///      1,162,809 gas for the 8-public-signal Phase 2 encrypted-bet verifier on
+    ///      live Monad (MEASUREMENTS.md §1). On top of verification an action also
+    ///      pays:
     ///        - intrinsic tx cost and calldata,
     ///        - nullifier insertion and commitment-tree subtree update,
     ///        - the ElGamal accumulator update (Phase 2),
     ///        - cold storage access, at Monad's 8,100 per cold SLOAD (4x Ethereum).
     ///
-    ///      2,000,000 leaves roughly 900,000 gas of headroom over the measured
-    ///      verify cost. That is deliberate slack: the envelope should not need to
-    ///      move as Phase 1 and Phase 2 add tree and accumulator work, because
-    ///      every change to it is publicly observable and shrinks the anonymity set
-    ///      of everything submitted before it.
+    ///      DO NOT READ THE REMAINING ~837,000 AS HEADROOM. That subtraction compares
+    ///      an isolated `eth_call` verify against the envelope, and a real transaction
+    ///      pays for far more than the verify: measured on real testnet transactions,
+    ///      `deposit` costs 1,816,031 -- 91% of this envelope -- against a local
+    ///      `forge` figure of 1,378,641 (MEASUREMENTS.md §1c). Local pricing charges
+    ///      neither calldata nor the intrinsic cost nor true cross-contract cold
+    ///      access. The real remaining headroom is closer to 184,000.
+    ///
+    ///      The envelope stays at 2,000,000 regardless, because every change to it is
+    ///      publicly observable and shrinks the anonymity set of everything submitted
+    ///      before it. An action that does not fit gets optimised; the envelope does
+    ///      not move to accommodate it.
     uint256 internal constant UNIFORM_ACTION_GAS_LIMIT = 2_000_000;
 
     /// @notice Highest verify cost we have actually measured on Monad, for any
@@ -52,8 +60,14 @@ library ActionGasPolicy {
     ///      transaction pays Monad's cold account access charge (~10,100, versus
     ///      2,600 on Ethereum) on top of the warm execution cost. Using the warm
     ///      figure here would under-declare by roughly that amount.
-    ///      Warm equivalent, for reference: 1,090,965.
-    uint256 internal constant MAX_MEASURED_VERIFY_GAS = 1_101_216;
+    ///      Warm equivalent, for reference: 1,152,559.
+    ///
+    ///      Phase 2's `bet_encrypted` now sets this. It carries 8 public signals
+    ///      against `bet`'s 4 -- the ciphertext is four field elements the contract
+    ///      has to add to the accumulator, so it cannot be packed away -- and the
+    ///      four extra signals cost a measured 123,105 gas, 30,776 each. That is the
+    ///      per-signal price the whole packing discipline exists to avoid paying.
+    uint256 internal constant MAX_MEASURED_VERIFY_GAS = 1_162_809;
 
     /// @notice Block gas limit measured on Monad mainnet.
     /// @dev Docs claim 200,000,000; that figure is stale. Measured at 150,000,000.
