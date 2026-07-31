@@ -35,6 +35,8 @@ import {
 import {
   CommitmentTree,
   BATCH_SIZE,
+  rebuildBatches,
+  type GraftedBatch,
   FIELD_SIZE,
   initHasher,
   derivedFiller,
@@ -69,6 +71,11 @@ export interface SequencerConfig {
   mnemonic: string;
   /** Graft a padded batch after this long, even if fewer than 64 are queued. */
   maxBatchDelayMs?: number;
+  /**
+   * Block the pool was deployed at. Without it `resync` scans logs from genesis, which
+   * public RPC endpoints rate-limit or refuse outright.
+   */
+  deployBlock?: bigint;
 }
 
 export class Sequencer {
@@ -100,16 +107,51 @@ export class Sequencer {
    * that never existed, and every proof built from them fails.
    */
   async resync(): Promise<void> {
-    const inserted = await this.read("insertedCount");
+    const inserted = Number(await this.read("insertedCount"));
+    this.tree.reset();
+    if (inserted === 0) return;
 
-    const leaves: bigint[] = [];
-    for (let i = 0n; i < inserted; i++) {
-      leaves.push(await this.read("pendingCommitments", [i]));
-    }
+    // The batch log, not the queue, is the source of truth for tree SHAPE. `insertedCount`
+    // counts real commitments consumed; the tree also holds derived fillers, which were
+    // never queued. See `rebuildBatches`.
+    const logs = await this.publicClient.getLogs({
+      address: this.config.poolAddress,
+      event: POOL_ABI[1],
+      fromBlock: this.config.deployBlock ?? 0n,
+      toBlock: "latest",
+    });
 
-    for (let i = 0; i < leaves.length; i += BATCH_SIZE) {
-      this.tree.insertBatch(leaves.slice(i, i + BATCH_SIZE));
+    const batches: GraftedBatch[] = logs.map((l) => ({
+      startIndex: (l.args as { startIndex: bigint }).startIndex,
+      count: Number((l.args as { count: bigint }).count),
+    }));
+
+    const queued = await this.readQueued(inserted);
+    for (const batch of rebuildBatches(batches, queued)) {
+      this.tree.insertBatch(batch);
     }
+  }
+
+  /**
+   * Read the first `count` queued commitments.
+   *
+   * Chunked and parallel rather than a serial `await` per leaf. The serial version cost one
+   * RPC round-trip per commitment ever inserted, so a restart went as O(n) network calls --
+   * minutes on a market of any size, during which no Merkle path can be served and
+   * therefore no user can build a proof. A restart is not a rare event on a host that
+   * sleeps idle services.
+   */
+  private async readQueued(count: number): Promise<bigint[]> {
+    const CHUNK = 64;
+    const out: bigint[] = [];
+    for (let i = 0; i < count; i += CHUNK) {
+      const end = Math.min(i + CHUNK, count);
+      const chunk = await Promise.all(
+        Array.from({ length: end - i }, (_, k) => this.read("pendingCommitments", [BigInt(i + k)])),
+      );
+      out.push(...chunk);
+    }
+    return out;
   }
 
   private async read(fn: string, args: readonly unknown[] = []): Promise<bigint> {

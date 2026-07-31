@@ -65,6 +65,15 @@ const OUTCOME_YES = 1;
 const OUTCOME_NO = 2;
 
 /**
+ * Blocks behind the tip the bet cursor trails.
+ *
+ * The cursor is monotonic -- it never re-reads a range -- so a log counted from a block
+ * that is later reorged out is counted forever. Trailing the head makes that vanishingly
+ * unlikely without needing reorg handling.
+ */
+const CONFIRMATIONS = 5n;
+
+/**
  * BSGS search bound. The circuits range-check `units` to 40 bits, but a POOL total is a sum
  * of many such stakes, so the bound has to cover the pool rather than one bet.
  *
@@ -92,6 +101,11 @@ export interface PublisherConfig {
   publisherPrivateKey: `0x${string}`;
   policy?: RatioPolicy;
   decryptBound?: bigint;
+  /**
+   * Block the accumulator was deployed at. Without it the first scan starts at genesis,
+   * which public RPC endpoints rate-limit or refuse.
+   */
+  deployBlock?: bigint;
 }
 
 export interface TickResult {
@@ -111,6 +125,16 @@ export class Publisher {
 
   /** betCount at the last publication, per market. Rebuilt from logs on first tick. */
   private readonly betCountAtLastPublish = new Map<number, number>();
+
+  /**
+   * Running bet count per market, plus the block it is accurate through.
+   *
+   * Without this the publisher re-scanned every `StakeAccumulated` log from genesis on
+   * every tick. That is O(chain length) per tick forever: it grows without bound, and it
+   * is exactly the query a public RPC endpoint throttles first. The cursor makes a tick
+   * cost one small range query regardless of how old the market is.
+   */
+  private readonly betCursor = new Map<number, { count: number; throughBlock: bigint }>();
 
   constructor(config: PublisherConfig) {
     this.config = config;
@@ -241,16 +265,36 @@ export class Publisher {
     return this.decryptor!.decrypt(c1, c2, this.bound);
   }
 
-  /** Encrypted bets seen for this market, from `StakeAccumulated` logs. */
+  /**
+   * Encrypted bets seen for this market, from `StakeAccumulated` logs.
+   *
+   * Incremental: only the range since the last tick is queried, and the cursor advances
+   * to a CONFIRMED head rather than the tip. Counting a log from a block that later
+   * reorgs away would permanently overstate the count, and since the count gates
+   * publication cadence, an overstated count means publishing more often than the policy
+   * allows -- which is the leak the policy exists to bound.
+   */
   private async countBets(marketId: number): Promise<number> {
+    const head = await this.publicClient.getBlockNumber();
+    const confirmed = head > CONFIRMATIONS ? head - CONFIRMATIONS : 0n;
+
+    const cached = this.betCursor.get(marketId);
+    const from = cached ? cached.throughBlock + 1n : (this.config.deployBlock ?? 0n);
+
+    // Nothing newly confirmed since last time.
+    if (cached && confirmed < from) return cached.count;
+
     const logs = await this.publicClient.getLogs({
       address: this.config.accumulatorAddress,
       event: ACCUMULATOR_ABI[1],
       args: { marketId },
-      fromBlock: 0n,
-      toBlock: "latest",
+      fromBlock: from,
+      toBlock: confirmed,
     });
-    return logs.length;
+
+    const count = (cached?.count ?? 0) + logs.length;
+    this.betCursor.set(marketId, { count, throughBlock: confirmed });
+    return count;
   }
 
   private async isBettingClosed(marketId: number): Promise<boolean> {

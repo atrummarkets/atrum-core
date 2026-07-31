@@ -81,6 +81,62 @@ export interface MerklePath {
   pathIndices: bigint[];
 }
 
+/** One grafted batch, as reported by `BatchInserted(startIndex, count, newRoot)`. */
+export interface GraftedBatch {
+  /** Tree index the batch was grafted at -- the contract's `treeStart`. */
+  startIndex: bigint;
+  /** How many of the 64 slots were REAL queued commitments. The rest are fillers. */
+  count: number;
+}
+
+/**
+ * Rebuild the exact 64-leaf batches the contract grafted, from the queue plus the batch
+ * log.
+ *
+ * WHY THIS IS NOT `chunk(queuedCommitments, 64)`.
+ *
+ * `flushBatch` advances `insertedCount` by the number of REAL commitments consumed, but
+ * always grafts exactly `BATCH_SIZE` leaves -- the remainder are fillers derived on-chain.
+ * So after any partial batch the tree contains leaves that were never queued, and the two
+ * counts permanently disagree.
+ *
+ * The mirror used to rebuild by slicing the queue into 64s. That is wrong twice over: the
+ * final slice is short, so `insertBatch` throws and the sequencer cannot restart at all;
+ * and even if it were padded, the fillers depend on each batch's own `treeStart`, which
+ * the queue does not record. Partial batches are not an edge case -- `maxBatchDelayMs`
+ * exists to submit them, so a quiet market produces them by design.
+ *
+ * @param batches  every `BatchInserted`, in graft order.
+ * @param queued   real commitments in queue order; at least `sum(counts)` of them.
+ */
+export function rebuildBatches(batches: GraftedBatch[], queued: bigint[]): bigint[][] {
+  const out: bigint[][] = [];
+  let consumed = 0;
+
+  for (const { startIndex, count } of batches) {
+    if (count < 0 || count > BATCH_SIZE) {
+      throw new Error(`batch at ${startIndex} claims ${count} real leaves, outside [0, ${BATCH_SIZE}]`);
+    }
+    if (consumed + count > queued.length) {
+      // The queue is behind the log. Rebuilding anyway would graft the wrong leaves and
+      // hand out paths for a tree that never existed, so refuse.
+      throw new Error(
+        `batch at ${startIndex} needs queued commitments ${consumed}..${consumed + count - 1}, ` +
+          `but only ${queued.length} are available`,
+      );
+    }
+
+    const leaves = queued.slice(consumed, consumed + count);
+    for (let slot = count; slot < BATCH_SIZE; slot++) {
+      leaves.push(derivedFiller(startIndex, BigInt(slot)));
+    }
+    out.push(leaves);
+    consumed += count;
+  }
+
+  return out;
+}
+
 export class CommitmentTree {
   readonly depth: number;
   readonly zeros: bigint[] = [];
@@ -100,6 +156,17 @@ export class CommitmentTree {
 
   get size(): number {
     return this.leaves.length;
+  }
+
+  /**
+   * Drop every leaf.
+   *
+   * `resync` rebuilds from chain state, and rebuilding onto a non-empty mirror would
+   * append a second copy of the whole tree rather than replacing it -- producing a mirror
+   * that is batch-aligned, throws no error, and serves wrong paths for every commitment.
+   */
+  reset(): void {
+    this.leaves.length = 0;
   }
 
   /**
