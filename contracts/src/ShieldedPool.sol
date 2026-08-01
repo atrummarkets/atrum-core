@@ -7,6 +7,7 @@ import {IncrementalMerkleTree} from "./IncrementalMerkleTree.sol";
 import {INullifierSet} from "./INullifierSet.sol";
 import {ParimutuelPool} from "./ParimutuelPool.sol";
 import {ElGamalAccumulator} from "./ElGamalAccumulator.sol";
+import {Denominations} from "./Denominations.sol";
 
 interface IDepositVerifier {
     function verifyProof(
@@ -230,6 +231,8 @@ contract ShieldedPool {
     error MarketAlreadyRegistered();
     error NotEnoughQueued();
     error ZeroUnits();
+    /// @dev The amount is not on the denomination ladder, so it would identify its owner.
+    error NotADenomination(uint256 amount);
     error BettingClosed();
     error NotResolved();
     error LosingPosition();
@@ -354,7 +357,12 @@ contract ShieldedPool {
         uint32 marketId,
         uint256 units
     ) external {
-        if (units == 0) revert ZeroUnits();
+        // A deposit's amount is PUBLIC, so an amount nobody else uses is a name tag: the
+        // next bet that spends a one-of-a-kind note is unmistakably its owner's. Worse, the
+        // odd amount is its own anonymity bucket, so it shrinks the set for everyone else
+        // too -- which is why this is a consensus rule and not a wallet convention.
+        // Subsumes the old `units == 0` check; zero is not on the ladder.
+        if (!Denominations.isValid(units)) revert NotADenomination(units);
 
         Vault vault = marketVault[marketId];
         if (address(vault) == address(0)) revert MarketNotRegistered();
@@ -735,6 +743,16 @@ contract ShieldedPool {
         // Rejected in-circuit too. Checked again because a zero withdrawal burns the note and
         // pays nothing -- a silent loss of funds with no error anywhere.
         if (amount == 0) revert ZeroAmount();
+
+        // The withdrawn amount is PUBLIC. A settled payout is whatever the parimutuel
+        // arithmetic produced -- 1,041, an odd number -- and withdrawing it in full would
+        // publish a value that uniquely identifies the position that earned it, undoing
+        // exactly what `redeemPrivate` just protected. So the public leg must be a ladder
+        // amount and the remainder stays behind as a private change note.
+        //
+        // The CHANGE is deliberately unconstrained: it never becomes public, and forcing a
+        // parimutuel payout onto a ladder would be impossible rather than inconvenient.
+        if (!Denominations.isValid(amount)) revert NotADenomination(amount);
 
         Vault vault = marketVault[marketId];
         if (address(vault) == address(0)) revert MarketNotRegistered();

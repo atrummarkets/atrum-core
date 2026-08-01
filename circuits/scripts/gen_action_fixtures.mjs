@@ -407,7 +407,12 @@ async function main() {
   //
   // A different stake from the first, deliberately: with two equal stakes a broken
   // accumulator that simply doubled one input would produce the same answer.
-  const SECOND_UNITS = 37n;
+  //
+  // Was 37, which is not on the denomination ladder. `ShieldedPool.deposit` now refuses
+  // any amount that is not a power of ten, because a one-of-a-kind deposit amount is a
+  // name tag -- see `Denominations.sol`. 10 keeps the stakes distinct while being a
+  // legal rung.
+  const SECOND_UNITS = 10n;
 
   const encDepositNote2 = {
     nullifier: randomField(),
@@ -647,8 +652,13 @@ async function main() {
   // The settled note is the first leaf of batch 6.
   const wdPath = tree.path(5 * BATCH_SIZE);
 
-  // Take a round 60 of the 100-unit payout, leaving 40 as change.
-  const wdAmount = 60n;
+  // Take a ladder amount out of the payout and leave the rest as private change.
+  //
+  // Was 60, which is not a rung. The withdrawn amount is PUBLIC, so it must look like
+  // every other withdrawal or it identifies the position that earned it -- which is the
+  // whole reason partial withdrawal exists. The CHANGE is unconstrained: it stays a
+  // private note, and a parimutuel payout cannot be forced onto a ladder anyway.
+  const wdAmount = 10n;
   const wdChange = rpPayout - wdAmount;
   assert(wdAmount + wdChange === rpPayout, "withdraw does not conserve the note value");
   assert(wdAmount > 0n, "withdraw amount must be non-zero");
