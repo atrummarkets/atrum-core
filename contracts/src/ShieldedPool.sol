@@ -650,10 +650,35 @@ contract ShieldedPool {
         if (!encryptedMarket[marketId]) revert WrongActionForMarket();
 
         if (address(encryptedTotals) == address(0)) revert AlreadyBound();
-        if (!encryptedTotals.settled(marketId)) revert NotSettled2();
 
         Vault.Outcome resolved = vault.outcome();
         if (resolved == Vault.Outcome.Unresolved) revert NotResolved();
+
+        // VOID: everybody is refunded 1:1, whichever side they backed.
+        //
+        // Deliberately does NOT require settlement. A market voids because something broke,
+        // and requiring the committee to publish final totals first would make the escape
+        // hatch depend on the same machinery that failed -- if the committee is gone, funds
+        // stay frozen and `Void` bought nothing.
+        //
+        // The refund needs no new circuit path. `redeem_private` computes
+        // `payout = units * totalPool / winningPool`, so pinning `totalPool == winningPool`
+        // makes that exactly `units` -- a 1:1 refund through arithmetic that already exists
+        // and is already constrained. The prover may choose the shared value; every choice
+        // yields the same payout, and zero is refused because the circuit's division needs a
+        // non-zero divisor.
+        if (resolved == Vault.Outcome.Void) {
+            if (totalPool != winningPool) revert TotalsMismatch();
+            if (winningPool == 0) revert TotalsMismatch();
+            // Any real position refunds, winning or losing -- that is what void means. The
+            // circuit still refuses `outcome == 3`, which is what closes the mint loop.
+            if (outcome != OUTCOME_UNBET && outcome != OUTCOME_YES && outcome != OUTCOME_NO) {
+                revert LosingOrSettledPosition();
+            }
+            return;
+        }
+
+        if (!encryptedTotals.settled(marketId)) revert NotSettled2();
 
         // A losing position is worth nothing, so there is nothing to redeem. `outcome == 3`
         // is a SETTLED payout note, which the circuit also rejects -- checked here too
@@ -729,7 +754,17 @@ contract ShieldedPool {
         _queue(changeCommitment);
 
         Vault vault = marketVault[marketId];
-        vault.redeem(amount);
+
+        // A voided market has no winning side, so there is nothing to `redeem` against.
+        // Refunds come out through `merge`, which burns one YES and one NO per unit -- the
+        // only solvent route, because the vault holds exactly one unit of collateral per
+        // (YES, NO) pair. The pool always holds the two in equal measure, since every unit
+        // entered through `split`, so this can never fail for want of one side.
+        if (vault.outcome() == Vault.Outcome.Void) {
+            vault.merge(amount);
+        } else {
+            vault.redeem(amount);
+        }
 
         if (!vault.collateral().transfer(recipient, amount * vault.denomination())) {
             revert TransferFailed();

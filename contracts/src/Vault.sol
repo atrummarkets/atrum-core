@@ -29,7 +29,20 @@ contract Vault {
     enum Outcome {
         Unresolved,
         Yes,
-        No
+        No,
+        /// @dev The question could not be answered, so nobody wins and everybody is refunded.
+        ///
+        ///      This is the system's ONLY emergency control, and it is deliberately not a
+        ///      control at all -- there is no key, no committee and no judgement behind it.
+        ///      `voidMarket` is permissionless and purely mechanical.
+        ///
+        ///      Without it an unanswerable market is unanswerable FOREVER: `resolve` refuses
+        ///      `Unresolved`, `redeemPrivate` requires resolution, and every stake stays
+        ///      frozen for good. That is not hypothetical with an oracle resolver -- if no
+        ///      signed price lands in the committed window, `parsePriceFeedUpdates` reverts
+        ///      permanently by design. A market that pays the wrong side is bad; one that
+        ///      pays nobody is worse.
+        Void
     }
 
     // -----------------------------------------------------------------------
@@ -68,6 +81,15 @@ contract Vault {
     /// @notice Minimum enforced gap between betting close and resolution start.
     uint64 public constant MIN_RESOLUTION_GAP = 1 hours;
 
+    /// @notice How long after resolution opens before anyone may void an unresolved market.
+    ///
+    /// @dev Long enough that a slow-but-working resolver is never pre-empted, short enough
+    ///      that funds are not hostage to a resolver that will never come. It cannot be
+    ///      abused in either direction: `voidMarket` refuses a market that is already
+    ///      resolved, so nobody can void one whose outcome they dislike, and it refuses
+    ///      early, so nobody can race a pending resolution.
+    uint64 public constant VOID_DELAY = 7 days;
+
     // -----------------------------------------------------------------------
     // Mutable state
     // -----------------------------------------------------------------------
@@ -92,6 +114,7 @@ contract Vault {
     event Split(address indexed account, uint256 units);
     event Merge(address indexed account, uint256 units);
     event Resolved(Outcome outcome);
+    event Voided(uint64 votableAt);
     event Redeem(address indexed account, uint256 units, uint256 payout);
 
     // -----------------------------------------------------------------------
@@ -105,6 +128,8 @@ contract Vault {
     error NotResolved();
     error TooEarlyToResolve();
     error InvalidOutcome();
+    error MarketVoided();
+    error TooEarlyToVoid(uint64 votableAt);
     error InsufficientPosition();
     error TransferFailed();
     error InvalidDenomination();
@@ -169,7 +194,12 @@ contract Vault {
     ///      the same token.
     function merge(uint256 units) external {
         if (units == 0) revert ZeroUnits();
-        if (outcome != Outcome.Unresolved) revert AlreadyResolved();
+        // Allowed while unresolved, and again once VOID -- a voided market refunds through
+        // merge rather than redeem. Burning one YES and one NO per unit is the only
+        // solvent way to refund both sides: the vault holds exactly one unit of collateral
+        // per (YES, NO) pair, so paying each side 1:1 through `redeem` would need twice the
+        // collateral that exists.
+        if (outcome != Outcome.Unresolved && outcome != Outcome.Void) revert AlreadyResolved();
 
         if (yesBalance[msg.sender] < units || noBalance[msg.sender] < units) {
             revert InsufficientPosition();
@@ -201,6 +231,10 @@ contract Vault {
         if (msg.sender != resolver) revert NotResolver();
         if (outcome != Outcome.Unresolved) revert AlreadyResolved();
         if (outcome_ == Outcome.Unresolved) revert InvalidOutcome();
+        // The resolver may pick a winner. It may NOT declare the market void -- that would
+        // hand it a discretionary refund switch, and the whole point of `Void` being
+        // deadline-gated is that no role can reach for it.
+        if (outcome_ == Outcome.Void) revert InvalidOutcome();
         if (block.timestamp < resolutionStartTime) revert TooEarlyToResolve();
 
         outcome = outcome_;
@@ -210,9 +244,39 @@ contract Vault {
     /// @notice Burn `units` of the winning outcome token for `units * denomination`.
     /// @dev Losing tokens are simply worth nothing; they are never burned, so the
     ///      accounting deliberately leaves them outstanding.
+    /// @notice Declare a market void once it is clear nobody is going to resolve it.
+    ///
+    /// @dev PERMISSIONLESS AND MECHANICAL, which is the entire design.
+    ///
+    ///      Anyone may call, but only after `resolutionStartTime + VOID_DELAY`, and only
+    ///      while the market is still unresolved. Both bounds matter:
+    ///
+    ///        - refusing an already-resolved market means nobody can void an outcome they
+    ///          dislike after seeing it;
+    ///        - refusing before the deadline means nobody can race a resolver that is simply
+    ///          slow.
+    ///
+    ///      So there is no discretion to capture. The caller cannot influence WHETHER a
+    ///      market voids, only observe that it already has by the clock.
+    ///
+    ///      Refunds then flow through `merge`, not `redeem` -- see the note there.
+    function voidMarket() external {
+        if (outcome != Outcome.Unresolved) revert AlreadyResolved();
+
+        uint64 votableAt = resolutionStartTime + VOID_DELAY;
+        if (block.timestamp < votableAt) revert TooEarlyToVoid(votableAt);
+
+        outcome = Outcome.Void;
+        emit Voided(votableAt);
+    }
+
     function redeem(uint256 units) external {
         if (units == 0) revert ZeroUnits();
         if (outcome == Outcome.Unresolved) revert NotResolved();
+        // A void market has no winning side, so there is nothing to redeem against. Refunds
+        // go through `merge`. Without this the branch below would silently treat NO as the
+        // winner, because it is the `else` of a two-way check.
+        if (outcome == Outcome.Void) revert MarketVoided();
 
         mapping(address => uint256) storage winning = outcome == Outcome.Yes ? yesBalance : noBalance;
 
