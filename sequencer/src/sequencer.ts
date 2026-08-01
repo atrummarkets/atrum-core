@@ -52,6 +52,8 @@ export const POOL_ABI = parseAbi([
   "function pendingCommitments(uint256) view returns (uint256)",
   "function flushBatch(uint256[] calldata leaves)",
   "function BATCH_SIZE() view returns (uint256)",
+  "function batchCount() view returns (uint256)",
+  "function batchRealCounts(uint256) view returns (uint32)",
 ]);
 
 /**
@@ -111,19 +113,27 @@ export class Sequencer {
     this.tree.reset();
     if (inserted === 0) return;
 
-    // The batch log, not the queue, is the source of truth for tree SHAPE. `insertedCount`
-    // counts real commitments consumed; the tree also holds derived fillers, which were
-    // never queued. See `rebuildBatches`.
-    const logs = await this.publicClient.getLogs({
-      address: this.config.poolAddress,
-      event: POOL_ABI[1],
-      fromBlock: this.config.deployBlock ?? 0n,
-      toBlock: "latest",
-    });
+    // Batch boundaries come from CONTRACT STORAGE, not from `BatchInserted` logs.
+    //
+    // Monad's public RPC caps `eth_getLogs` at a 100-block range (error -32614). A market a
+    // week old spans over a million blocks, so a log-based rebuild would need tens of
+    // thousands of requests and be rate-limited long before finishing. Since a restart must
+    // complete before any Merkle path can be served, that is an outage, not a slow boot.
+    //
+    // `insertedCount` and `tree.nextIndex()` give the totals but not the DISTRIBUTION of
+    // real leaves across batches -- and that distribution decides where every filler sits.
+    // So the contract stores it.
+    const batchTotal = Number(await this.read("batchCount"));
 
-    const batches: GraftedBatch[] = logs.map((l) => ({
-      startIndex: (l.args as { startIndex: bigint }).startIndex,
-      count: Number((l.args as { count: bigint }).count),
+    const counts = await Promise.all(
+      Array.from({ length: batchTotal }, (_, i) => this.read("batchRealCounts", [BigInt(i)])),
+    );
+
+    const batches: GraftedBatch[] = counts.map((count, i) => ({
+      // Batches are always BATCH_SIZE leaves and always aligned, so the graft index is
+      // implied by position -- it does not need storing.
+      startIndex: BigInt(i * BATCH_SIZE),
+      count: Number(count),
     }));
 
     const queued = await this.readQueued(inserted);

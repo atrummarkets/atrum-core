@@ -73,6 +73,10 @@ const OUTCOME_NO = 2;
  */
 const CONFIRMATIONS = 5n;
 
+/// Monad's public RPC rejects wider ranges outright: "eth_getLogs is limited to a 100 range"
+/// (error -32614). Measured, not assumed.
+const MAX_LOG_RANGE = 100n;
+
 /**
  * BSGS search bound. The circuits range-check `units` to 40 bits, but a POOL total is a sum
  * of many such stakes, so the bound has to cover the pool rather than one bet.
@@ -279,20 +283,35 @@ export class Publisher {
     const confirmed = head > CONFIRMATIONS ? head - CONFIRMATIONS : 0n;
 
     const cached = this.betCursor.get(marketId);
-    const from = cached ? cached.throughBlock + 1n : (this.config.deployBlock ?? 0n);
+
+    // COLD START DOES NOT SCAN HISTORY. Monad's public RPC caps `eth_getLogs` at a 100-block
+    // range, so walking back to the deploy block would take thousands of requests.
+    //
+    // It does not need to. The count only gates publication CADENCE, and starting from the
+    // current head means a freshly-booted publisher waits for a full quota of NEW bets
+    // before its first publication. That errs toward publishing less, which is the safe
+    // direction -- the leak the policy bounds comes from publishing too OFTEN.
+    const from = cached ? cached.throughBlock + 1n : confirmed;
 
     // Nothing newly confirmed since last time.
     if (cached && confirmed < from) return cached.count;
 
-    const logs = await this.publicClient.getLogs({
-      address: this.config.accumulatorAddress,
-      event: ACCUMULATOR_ABI[1],
-      args: { marketId },
-      fromBlock: from,
-      toBlock: confirmed,
-    });
+    // Chunked to the RPC's 100-block ceiling. Even an incremental range exceeds it after a
+    // few minutes of downtime, and a host that sleeps idle services produces exactly that.
+    let found = 0;
+    for (let lo = from; lo <= confirmed; lo += MAX_LOG_RANGE) {
+      const hi = lo + MAX_LOG_RANGE - 1n < confirmed ? lo + MAX_LOG_RANGE - 1n : confirmed;
+      const logs = await this.publicClient.getLogs({
+        address: this.config.accumulatorAddress,
+        event: ACCUMULATOR_ABI[1],
+        args: { marketId },
+        fromBlock: lo,
+        toBlock: hi,
+      });
+      found += logs.length;
+    }
 
-    const count = (cached?.count ?? 0) + logs.length;
+    const count = (cached?.count ?? 0) + found;
     this.betCursor.set(marketId, { count, throughBlock: confirmed });
     return count;
   }

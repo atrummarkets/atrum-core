@@ -201,6 +201,24 @@ contract ShieldedPool {
     uint256[] public pendingCommitments;
     uint256 public insertedCount;
 
+    /// @notice Real (non-filler) leaf count of every batch ever grafted, in graft order.
+    ///
+    /// @dev Stored rather than left to `BatchInserted` logs, because the sequencer CANNOT
+    ///      read those logs on Monad: the public RPC caps `eth_getLogs` at a 100-block range
+    ///      (error -32614), and a market a week old spans over a million blocks. Rebuilding
+    ///      the mirror from logs would need tens of thousands of requests and be rate-limited
+    ///      long before finishing.
+    ///
+    ///      The mirror needs this and cannot derive it. Batches are always 64 leaves but only
+    ///      the first `real` of them were queued; the rest are on-chain fillers. Current state
+    ///      gives the totals -- `insertedCount` and `tree.nextIndex()` -- but not how the real
+    ///      leaves were DISTRIBUTED across batches, and that distribution is what decides
+    ///      where each filler sits. Get it wrong and every Merkle path is wrong.
+    ///
+    ///      One SSTORE on a 3,637,441-gas sequencer operation, which is not subject to the
+    ///      uniform action envelope because nothing about a batch is private.
+    uint32[] public batchRealCounts;
+
     // -----------------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------------
@@ -901,9 +919,15 @@ contract ShieldedPool {
         // Only the real commitments consume the queue; the fillers occupy tree leaves
         // but were never queued by anyone.
         insertedCount = start + real;
+        batchRealCounts.push(uint32(real));
         tree.insertSubtree(batch);
 
         emit BatchInserted(treeStart, real, tree.root());
+    }
+
+    /// @notice How many batches have been grafted.
+    function batchCount() external view returns (uint256) {
+        return batchRealCounts.length;
     }
 
     /// @notice The filler leaf for slot `slot` of the batch grafted at `treeStart`.

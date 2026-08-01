@@ -9,23 +9,9 @@
  * Run: node --experimental-strip-types src/main.ts
  */
 import { createServer } from "node:http";
-import { defineChain } from "viem";
 import { Sequencer } from "./sequencer.ts";
+import { chainFor } from "./chains.ts";
 import type { Address } from "viem";
-
-export const monadTestnet = defineChain({
-  id: 10143,
-  name: "Monad Testnet",
-  nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
-  rpcUrls: { default: { http: ["https://testnet-rpc.monad.xyz"] } },
-});
-
-export const monadMainnet = defineChain({
-  id: 143,
-  name: "Monad",
-  nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
-  rpcUrls: { default: { http: ["https://rpc.monad.xyz"] } },
-});
 
 function required(name: string): string {
   const value = process.env[name];
@@ -34,7 +20,7 @@ function required(name: string): string {
 }
 
 async function main(): Promise<void> {
-  const chain = process.env.NETWORK === "mainnet" ? monadMainnet : monadTestnet;
+  const chain = chainFor(process.env.NETWORK);
 
   const sequencer = new Sequencer({
     rpcUrl: process.env.RPC_URL ?? chain.rpcUrls.default.http[0]!,
