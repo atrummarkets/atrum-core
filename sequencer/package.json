@@ -9,7 +9,8 @@
     "test": "vitest run",
     "start": "node --experimental-strip-types src/main.ts",
     "start:publisher": "node --experimental-strip-types src/publisher-main.ts",
-    "start:sequencer": "node --experimental-strip-types src/main.ts"
+    "start:sequencer": "node --experimental-strip-types src/main.ts",
+    "verify:mirror": "node --experimental-strip-types src/verify-mirror.ts"
   },
   "dependencies": {
     "@noble/hashes": "^2.2.0",

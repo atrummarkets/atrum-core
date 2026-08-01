@@ -144,3 +144,9 @@ verify-deployment: ## Check a LIVE deployment against every invariant (POOL=0x..
 	@test -n "$(POOL)" || { echo "usage: make verify-deployment POOL=0x..."; exit 1; }
 	cd contracts && POOL=$(POOL) forge script script/VerifyDeployment.s.sol \
 	  --rpc-url monad_testnet --network monad
+
+.PHONY: verify-mirror
+verify-mirror: ## Rebuild the tree mirror from chain and assert it matches (POOL=0x..)
+	@test -n "$(POOL)" || { echo "usage: make verify-mirror POOL=0x..."; exit 1; }
+	cd contracts && set -a && . ./.env && set +a && cd ../sequencer && \
+	  POOL=$(POOL) npm run --silent verify:mirror
