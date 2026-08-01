@@ -68,6 +68,13 @@ ceremony: ## Trusted setup ceremony usage (multi-party). Run BEFORE the final de
 prove: ## Generate proofs and verify the ElGamal mechanism end to end
 	cd circuits && node scripts/prove.mjs
 
+# The denominator for the browser client's proving multiplier. Measured here rather than in
+# atrum-client because it measures THESE circuits, and because a multiplier whose halves come
+# from different machines describes the machines, not the runtimes.
+.PHONY: bench
+bench: ## Measure Groth16 proving time for the 4 live circuits under Node
+	cd circuits && node scripts/bench-proving.mjs
+
 .PHONY: fixtures
 fixtures: ## Real deposit/bet/redeem proofs for the Solidity suite to replay
 	cd circuits && node scripts/gen_action_fixtures.mjs

@@ -68,6 +68,11 @@ circuits/build/gate-*.json
 circuits/build/action-fixtures.json
 circuits/build/*_calldata.json
 
+# `make bench` output. Describes this machine's CPU, not the project -- and it is the
+# denominator atrum-client divides browser timings by, so it must be re-measured locally
+# rather than inherited from whoever committed last.
+circuits/build/proving-baseline.json
+
 # Trusted setup ceremony working directory. Intermediate zkeys are passed hand to hand
 # between contributors and are never committed -- `bet_encrypted` alone is 10MB and only the
 # final key matters. The public record is TRANSCRIPT.md, which pins every hash.
