@@ -7,6 +7,98 @@ Written to be read by someone who has not seen the earlier conversation.
 
 ---
 
+## 0. What changed on 2026-08-01, and what it cost to find out
+
+Fourteen commits. The protocol did not change much; almost everything below was found by
+DEPLOYING and then trying to use the thing. That is the headline finding of the day:
+
+> **Four live, fund-affecting bugs. All four were invisible to a passing 200+ test suite.
+> Three came from deployment or operations, not from the protocol.**
+
+| # | bug | consequence | how it surfaced |
+|---|---|---|---|
+| 1 | `bindEncryptedTotals` never called | **one-way vault** — deposits work, nothing can ever be withdrawn | querying the live pool by hand |
+| 2 | committee key hardcoded, went stale | **market could never settle** | `InvalidDecryptionProof()` on a real settlement, 65 min after the bets |
+| 3 | `resync` sliced the queue into 64s | **sequencer could not restart** after any partial batch | reasoning about Render restarts |
+| 4 | both services scanned `eth_getLogs` | **impossible on Monad** — public RPC caps at 100 blocks, Alchemy free at 9 | booting the publisher against the live chain |
+
+None of these are exotic. Each is the kind of thing that works on a laptop and fails the first
+time a real user touches it.
+
+### Deployed, measured, and proven on chain
+
+**`ShieldedPool 0x6af21cA16B40ae5Ab154eE1867f30FC3E64BfBED`** — full record and receipts in
+[`deployments/monad-testnet-10143/`](deployments/monad-testnet-10143/).
+
+The full private path ran end to end on testnet: deposit → `betEncrypted` ×2 → settle →
+`redeemPrivate` → `withdraw`, with the on-chain root matching the prover's `rootAfterBatch6`
+exactly. Every user action now has a real number:
+
+| action | local `forge` | **real testnet** | ratio | % of 2,500,000 |
+|---|---|---|---|---|
+| `betEncrypted` | 1,381,102 | **~1,947,000** (proj.) | 1.41x | 78% |
+| `deposit` | 1,378,691 | **1,815,993** | 1.32x | 73% |
+| `withdraw` | 1,166,565 | **1,804,341** | **1.55x** | 72% |
+| `redeemPrivate` | 1,126,337 | **1,671,108** | 1.48x | 67% |
+
+Local `forge` understates by **32–55%**. My own projections were wrong in the unsafe
+direction — `withdraw` was projected at ~1,642,000 and came in at 1,804,341.
+
+**Monad bills the DECLARED gas limit — measured, not assumed.** A 21,000-gas transfer declared
+at 2,000,000 was charged for **2,114,412 gas**. That is the premise the uniform-envelope design
+rests on, and it means the envelope is a direct tax on every action.
+
+**The envelope moved once, to 2,500,000, and should not move again.** At 2,000,000 the binding
+action had 95,555 gas of headroom while two `betEncrypted` calls in the same run differed by
+**44,734 from cold/warm variation alone** — half the headroom consumed by ordinary variance.
+Overrunning is worse than expensive: the transaction reverts out of gas AND the user still pays
+the full declared limit.
+
+### Built today
+
+- **Publisher** — BSGS decryption, coarse-ratio policy, entrypoint, Render config. 51 tests.
+  Verified against the live chain: decrypts the real ciphertext, correctly declines a settled
+  market.
+- **Fixed denominations**, enforced on-chain. Privacy was resting on a wallet convention.
+- **`Vault.Outcome.Void`** — deadline-gated, permissionless refund. The only emergency control,
+  and deliberately one nobody can reach for.
+- **`IOracleResolver` + `PythResolver`** — market 10's outcome is decidable by **no address**.
+- **`DeploymentInvariants`** — a broken deployment now REVERTS instead of broadcasting.
+
+### The privacy leak found in the publisher's design
+
+A single ratio leaks nothing — `yes/(yes+no)` is scale-free. A SEQUENCE does, because three
+things are already public: every bet is a visible transaction, `betMeta` carries the OUTCOME so
+each bet's SIDE is known, and settlement reveals exact totals. Each published ratio is then one
+equation in the running sums, and settlement supplies the scale. Publish once per bet at full
+precision and an observer gets about as many equations as unknown stakes.
+
+Bounded by capping the number of equations (3 bets between publications) and degrading each from
+an equality to an interval (1% buckets). **That is a bound on a known attack, not a proof of
+privacy**, and the code says so.
+
+### The exploit in my own resolver, found by a question
+
+`parsePriceFeedUpdates` accepts ANY update in the window, and the CALLER supplies it. Pyth
+publishes ~every 400ms, so a 60-second window offers ~150 candidates — and since resolution is
+permissionless, a bettor could submit whichever price wins them the market. Switched to
+`parsePriceFeedUpdatesUnique`, which pins the result to the first update at or after the target.
+
+### Proving spike — before building a frontend
+
+| circuit | constraints | prove (node) | download |
+|---|---|---|---|
+| `deposit` | 1,621 | 322ms | 2.4MB |
+| **`bet_encrypted`** | **21,252** | **2,255ms** | **11.8MB** |
+| `redeem_private` | 14,405 | 1,437ms | 7.8MB |
+| `withdraw` | 14,438 | 1,411ms | 7.8MB |
+
+**29.8MB** for a full client. Download is the harder constraint, not proving time: a user cannot
+place a first bet without fetching 11.8MB. Node timings are a LOWER BOUND and **the browser
+multiplier is unmeasured** — that needs a real browser, not an estimate.
+
+---
+
 ## 1. Where we are
 
 Phase 0 and Phase 1 are both complete. Every Phase 1 deliverable in
@@ -671,22 +763,27 @@ most **~28 proofs**. Batch size is bounded by the transaction limit, not the blo
 
 ### 4.1 Engineering remaining
 
-**Immediate, in order:**
+**The protocol is done.** Everything that could have failed for cryptographic or gas reasons
+now works on a real chain. What remains is three different KINDS of work:
 
-1. `ShieldedPool.withdraw` — the circuit and its 32 soundness tests exist; the contract path,
-   the `RedeemPrivateVerifier`-style verifier export, and an e2e test spanning
-   bet → settle → redeem → withdraw do not. This is the last piece of the private path.
-2. `cancel` — **do not build without a product decision first.** §1e shows it is an
-   adverse-selection problem with no parameter fix: a fee cannot price an unbounded informed
-   edge, and a deadline only shrinks the window. Recommendation is to ship without it.
-3. Publisher — cadence, BSGS ratio recovery, ratio-only publication. `publishAttestedRatio`
-   exists on-chain; the off-chain worker does not.
-4. Re-measure every action **on testnet** and set the uniform envelope once. Local
-   underestimates by ~30% (Phase 1: 1,378,641 local vs 1,816,031 real), so `betEncrypted` at
-   1,352,807 local likely lands near 1.8M — ~90% of a 2,000,000 envelope.
-5. Frontend — nothing exists in `atrum-core`.
+1. **Frontend** — nothing exists. Ordinary web work, and the critical path for a demo, the
+   video, real users and feedback. Shaped by the proving spike above: cache artifacts in
+   IndexedDB, lazy-load per action, prove in a Web Worker. Measure the browser multiplier
+   first.
+2. **Fixture lifecycle rewrite** — mechanical. Deletes `registerMarket`, `bet()`,
+   `ParimutuelPool` and the plaintext verifiers, leaving one market type and one exit. Blocks
+   nothing, but every line of dead code is audit surface you pay for.
+3. **Ceremony + threshold committee** — coordination, not code. Neither moves without other
+   people and calendar time, so **start them early**; they are the only items with an
+   irreducible wait.
 
+**Not building:** `cancel`. §1e shows it is adverse selection with no parameter fix.
 
+**Before real money, and none of it is engineering:**
+- The trusted setup is ONE contribution. `build.sh` says so plainly. Whoever holds that toxic
+  waste can forge proofs and mint collateral from nothing.
+- The committee is ONE key, held by the operator, who can therefore decrypt every bet.
+- No audit.
 
 **Phase 1 (build plan: weeks 1–3) — complete**
 - [x] `Vault.sol` + tests
