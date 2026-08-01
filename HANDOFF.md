@@ -12,40 +12,42 @@ Written to be read by someone who has not seen the earlier conversation.
 The protocol is done and proven on chain. Two tracks are open, they are independent, and
 one of them has an irreducible wait, so start it first even though it is the smaller job.
 
-### 1. Get the browser number. One command, and it unblocks everything else.
+### 1. Build the client. The measurement is done and the architecture is decided.
 
-`atrum-client/` is built and its assets are synced. Nobody has opened it in a browser, so
-**the browser proving multiplier is still unmeasured** — the single number that decides the
-whole client architecture.
+The browser number is **measured** (§0-bis): ~2-2.5x Node for the real circuits, and — the
+part that actually decided things — `bet_encrypted` freezes the main thread for **388ms**.
+**Proving runs in a Web Worker.** IndexedDB caching was never gated on it; 29.7MB is too much
+to re-download per session regardless.
+
+To reproduce the measurement at any point:
 
 ```bash
-cd ../atrum-client
-npm install                 # first time only
-npm run sync                # re-copy artefacts if atrum-core was rebuilt since
-npm run baseline            # Node timings on THIS machine — do not skip, see §0-bis
-npm run harness             # then open http://localhost:8080/harness.html and click Run
+cd ../atrum-core && make bench     # Node baseline on THIS machine — do not skip, see §0-bis
+cd ../atrum-client && npm run sync # artefacts + core's primitives bundled for the browser
+npm run browser-baseline           # headless Chromium, full table
+npm run harness                    # or drive it by hand at :8080/harness.html
 ```
 
-Expect `bet_encrypted` to dominate: 11.8MB to download and, on this machine, 897ms to prove
-under Node. Record what the browser does in §0-bis's table.
+What remains for the client: lazy-load per action (deposit + `bet_encrypted` = 14.2MB to place
+a first bet), witness building from **real notes** rather than the canned fixtures, Merkle
+paths from the sequencer's `GET /path?commitment=0x…`, and amount snapping to the denomination
+ladder.
 
-**Then, and only then**, make the architecture call. Two decisions, and only one of them is
-actually gated on the number:
+**Do not reimplement the protocol in the frontend.** `circuits/scripts/atrum.mjs` is already
+the third implementation of Atrum's hashing rules, alongside `note.circom` and
+`IncrementalMerkleTree.sol`, and all three must agree bit for bit. `atrum-client` bundles that
+module rather than porting it, and every sync re-derives values the circuits already accepted
+and **refuses the bundle if any differ**. Keep that module runtime-neutral — no `Buffer`, no
+`node:*` imports.
 
-- **Web Worker: gated.** If `fullProve` stalls the main thread long enough to freeze the UI —
-  likely at `bet_encrypted`'s size regardless of the raw multiplier — a worker is mandatory.
-  The harness deliberately yields before proving so you can watch whether the row paints.
-- **IndexedDB caching: not gated.** 30MB is too much to re-download per session whatever the
-  prove time is. Build it either way.
+**One blocker before the client can talk to the sequencer:** `sequencer/src/main.ts` sets no
+CORS headers, so a browser on another origin cannot read `/path`. Four `writeHead` calls. The
+harness does not need this — it runs entirely off local fixtures.
 
-Then the client itself: lazy-load per action (deposit + `bet_encrypted` = 14.2MB to place a
-first bet), witness building from real notes rather than the canned fixtures, Merkle paths
-from the sequencer's `GET /path?commitment=0x…`, and amount snapping to `Denominations.sol`'s
-powers-of-ten ladder.
-
-**One blocker to clear before the client can talk to the sequencer:** `sequencer/src/main.ts`
-sets no CORS headers, so a browser on another origin cannot read `/path`. Two `writeHead`
-calls. The harness does not need this — it runs entirely off local fixtures.
+⚠️ **The landmine when you build calldata:** snarkjs swaps each G2 coordinate pair in
+`exportSolidityCallData` versus the raw proof object (`gen_action_fixtures.mjs:88-94`). Use
+`exportSolidityCallData`. Building calldata from the raw proof gives you a well-formed proof
+that reverts.
 
 ### 2. Start the ceremony now, because it waits on people
 
@@ -113,9 +115,45 @@ that fetches each circuit's wasm and zkey, proves the canned input from
 rough heap delta. `scripts/sync-assets.sh` copies artefacts out of this repo — scripted,
 because atrum-zk-poc's hand-`cp`'d `web/vendor/` has no record of what built it.
 
-**[UNMEASURED] The browser multiplier is still unmeasured.** The harness is built and its
-assets serve, but nothing has opened it in a browser. That number remains the open question
-it was; running it is one command (`npm run harness`) and a click.
+### [MEASURED, headless] The browser multiplier — the question §0 left open
+
+Measured by driving the harness in headless Chromium 151 (`npm run browser-baseline`), every
+proof verified **in the browser**:
+
+| circuit | download | Node (this machine) | browser | multiplier | **frame stall** |
+|---|---|---|---|---|---|
+| `deposit` | 2.4MB | 369ms | **276ms** | **0.75x** | 96ms |
+| `bet_encrypted` | 11.8MB | 881ms | **1.83s** | 2.08x | **388ms** |
+| `redeem_private` | 7.8MB | 517ms | **1.04s** | 2.01x | 117ms |
+| `withdraw` | 7.8MB | 517ms | **1.27s** | 2.46x | 134ms |
+
+Full client 29.7MB, confirming the 29.8MB estimate.
+
+**The multiplier is ~2-2.5x for the three real circuits, and below 1 for `deposit`.** The
+sub-1x is not an error: `deposit` is 1,621 constraints, small enough that Node's process and
+module-load overhead outweighs the proving itself, while the browser arrives warm. It is a
+reminder that the multiplier is not a constant to extrapolate with — it depends on circuit
+size, and the number that matters is `bet_encrypted`'s, because that is the one every user
+hits on a first bet.
+
+Headless is a fair measurement — same V8, same wasm engine, and proving is pure compute. What
+it does not reproduce is contention with a real page's paint work, so the stalls above are if
+anything **optimistic**.
+
+### [DECIDED] Proving must run in a Web Worker
+
+Not on the multiplier — on the stall. `requestAnimationFrame` simply stops firing while the
+main thread is blocked, so the gap after it resumes is the freeze the user sees:
+
+> **`bet_encrypted` holds the main thread for 388ms. Every circuit exceeds 100ms.**
+
+A 2x multiplier would have been survivable; a third of a second of dead UI on the primary
+action is not, and it is measured in a headless browser with nothing else competing. So the
+worker is mandatory, and this is recorded as a decision with the number behind it rather than
+an assumption.
+
+**IndexedDB caching was never gated on this.** 29.7MB is too much to re-download per session
+at any prove speed.
 
 ### [MEASURED] Node proving is ~2x faster on this machine than §0 records
 
