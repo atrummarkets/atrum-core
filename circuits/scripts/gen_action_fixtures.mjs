@@ -59,7 +59,21 @@ function assert(condition, message) {
   if (!condition) throw new Error(`ASSERTION FAILED: ${message}`);
 }
 
+/**
+ * Every witness input the generator built, keyed by circuit.
+ *
+ * Written out because a browser client has to construct exactly these, and a recorded
+ * example is a far better specification than prose. Also feeds the proving-time spike --
+ * benchmarking needs real inputs, and inventing them by hand is how you end up measuring a
+ * witness that would never satisfy the circuit.
+ */
+const witnessInputs = {};
+
 async function prove(circuit, input, { emitCalldata = true } = {}) {
+  // Last one wins where a circuit is proved more than once; they are the same shape, which
+  // is all a client or a benchmark needs.
+  witnessInputs[circuit] = input;
+
   const { proof, publicSignals } = await snarkjs.groth16.fullProve(
     input,
     new URL(`${circuit}_js/${circuit}.wasm`, BUILD).pathname,
@@ -767,6 +781,13 @@ async function main() {
   };
 
   writeFileSync(OUT.pathname, JSON.stringify(fixtures, null, 2));
+
+  // BigInts are not JSON-serialisable; the circuits take decimal strings anyway, which is
+  // also the shape a browser client will hand snarkjs.
+  writeFileSync(
+    new URL("../build/witness-inputs.json", import.meta.url).pathname,
+    JSON.stringify(witnessInputs, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2),
+  );
 
   console.log("wrote", OUT.pathname);
   console.log("  deposit commitment :", depositCommitment);
