@@ -12,7 +12,7 @@
  */
 import { buildBabyjub } from "circomlibjs";
 import { randomBytes, createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 const babyJub = await buildBabyjub();
 const F = babyJub.F;
@@ -89,6 +89,47 @@ const out = {
   secret: secret.toString(),
   pubKey,
 };
+
+// `--check`: assert the key already on disk is the pinned one, and change nothing.
+//
+// WHY THIS EXISTS. `build.sh` regenerates the key only when the file is ABSENT, so a stale
+// key -- one generated before this seed was pinned, or left behind by ATRUM_RANDOM_KEY=1 --
+// is silently reused forever. Everything then still builds and every test still passes,
+// because the fixtures are regenerated against the stale key too. What breaks is agreement
+// with everyone else: a fresh clone derives the pinned key and gets different ciphertexts,
+// so committed key-dependent fixtures diff for no visible reason.
+//
+// This is the same failure mode as the committee key that went stale on testnet and left a
+// market that could never settle -- silent, and only visible once something downstream
+// disagrees.
+if (process.argv.includes("--check")) {
+  if (useRandom) {
+    console.log("ATRUM_RANDOM_KEY=1 -- skipping the pinned-key check by request.");
+    process.exit(0);
+  }
+  const path = new URL("../build/committee-key.json", import.meta.url);
+  let onDisk;
+  try {
+    onDisk = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    console.log("no committee key on disk yet -- it will be generated.");
+    process.exit(0);
+  }
+  if (onDisk.secret === out.secret) {
+    console.log("committee key matches the pinned derivation.");
+    process.exit(0);
+  }
+  console.error(
+    "\nSTALE COMMITTEE KEY.\n\n" +
+      `  on disk : ${onDisk.pubKey?.[0]}\n` +
+      `  pinned  : ${pubKey[0]}\n\n` +
+      "The key in circuits/build/ is not the pinned test key, so every ciphertext this\n" +
+      "build produces will disagree with a fresh clone's. Delete it and rebuild:\n\n" +
+      "  rm circuits/build/committee-key.json && make circuits\n\n" +
+      "(then `make verifiers && make fixtures` -- the key is compiled into the circuits.)\n",
+  );
+  process.exit(1);
+}
 
 writeFileSync(
   new URL("../build/committee-key.json", import.meta.url),

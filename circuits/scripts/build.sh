@@ -54,6 +54,14 @@ if [[ ! -f "$BUILD/committee-key.json" ]]; then
     echo "==> no committee key found, generating one (TEST KEY)"
     node scripts/keygen.mjs
 fi
+
+# A key that is merely PRESENT is not enough -- it must be the PINNED one. A stale key (from
+# before the seed was pinned, or left by ATRUM_RANDOM_KEY=1) is silently reused by the check
+# above, and everything still builds and passes because the fixtures regenerate against it
+# too. The only symptom is that committed key-dependent fixtures diff against a fresh clone.
+# Fail loudly here instead. `ATRUM_RANDOM_KEY=1` opts out.
+echo "==> checking the committee key is the pinned one"
+node scripts/keygen.mjs --check
 echo "==> deriving circom committee-key constants"
 node scripts/gen_committee_key_circom.mjs
 
