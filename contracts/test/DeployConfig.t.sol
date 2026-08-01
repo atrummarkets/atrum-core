@@ -6,6 +6,8 @@ import {Deploy} from "../script/Deploy.s.sol";
 import {ShieldedPool, IActionVerifier, IEncryptedTotals} from "../src/ShieldedPool.sol";
 import {Vault} from "../src/Vault.sol";
 import {EncryptedParimutuelPool} from "../src/EncryptedParimutuelPool.sol";
+import {DeploymentInvariants} from "../src/DeploymentInvariants.sol";
+import {IncrementalMerkleTree} from "../src/IncrementalMerkleTree.sol";
 
 /// @notice The deployment script's END STATE, asserted rather than eyeballed.
 ///
@@ -126,6 +128,34 @@ contract DeployConfigTest is Test {
             IEncryptedTotals(d.encryptedParimutuel),
             IActionVerifier(d.redeemPrivateVerifier),
             IActionVerifier(d.withdrawVerifier)
+        );
+    }
+
+    /// @notice THE WHOLE INVARIANT SET, in CI.
+    ///
+    /// @dev The individual assertions below predate `DeploymentInvariants` and are kept
+    ///      because a named failing test says more than one big one. This exercises the
+    ///      LIBRARY itself, which is what actually runs inside `Deploy.run()` and
+    ///      `VerifyDeployment` -- so a check that regresses there fails here rather than
+    ///      silently protecting nothing.
+    function test_deploy_satisfiesEveryInvariant() public view {
+        string memory json = vm.readFile("../circuits/build/committee-key.json");
+
+        DeploymentInvariants.check(
+            DeploymentInvariants.Expected({
+                pool: d.pool,
+                tree: d.tree,
+                accumulator: d.accumulator,
+                encryptedParimutuel: d.encryptedParimutuel,
+                parimutuel: d.parimutuel,
+                nullifiers: d.nullifiers,
+                sequencer: d.pool,
+                encryptedMarketId: ENCRYPTED_MARKET_ID,
+                oracleMarketId: 10,
+                committeeKeyX: vm.parseJsonUint(json, ".pubKey[0]"),
+                committeeKeyY: vm.parseJsonUint(json, ".pubKey[1]"),
+                expectedRoot: IncrementalMerkleTree(d.tree).root()
+            })
         );
     }
 

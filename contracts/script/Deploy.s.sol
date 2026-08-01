@@ -23,6 +23,7 @@ import {RedeemPrivateVerifier} from "../src/verifiers/RedeemPrivateVerifier.sol"
 import {WithdrawVerifier} from "../src/verifiers/WithdrawVerifier.sol";
 import {PythResolver} from "../src/PythResolver.sol";
 import {IPyth} from "../src/interfaces/IPyth.sol";
+import {DeploymentInvariants} from "../src/DeploymentInvariants.sol";
 import {MockERC20} from "../test/mocks/MockERC20.sol";
 
 /// @notice Deploy the Phase 1 stack.
@@ -117,6 +118,12 @@ contract Deploy is Script {
         _deployPool(d, deployer, sequencer);
 
         vm.stopBroadcast();
+
+        // VERIFY BEFORE REPORTING. Inside `run()` rather than in a test, because
+        // `forge script --broadcast` does not run tests -- and both deployment bugs this
+        // project has shipped were invisible to a 200-test suite for exactly that reason.
+        // A broken deployment now reverts instead of printing a tidy address list.
+        _verify(d);
 
         _report(d);
     }
@@ -309,6 +316,32 @@ contract Deploy is Script {
             IEncryptedTotals(d.encryptedParimutuel),
             IActionVerifier(d.redeemPrivateVerifier),
             IActionVerifier(d.withdrawVerifier)
+        );
+    }
+
+    /// @dev Every invariant a correct deployment must satisfy, checked against the chain
+    ///      that was just written to. Shares one list with `VerifyDeployment.s.sol` and
+    ///      `DeployConfig.t.sol`, so the three cannot drift apart.
+    function _verify(Deployed memory d) internal view {
+        (uint256 keyX, uint256 keyY) = _committeeKey();
+
+        DeploymentInvariants.check(
+            DeploymentInvariants.Expected({
+                pool: d.pool,
+                tree: d.tree,
+                accumulator: d.accumulator,
+                encryptedParimutuel: d.encryptedParimutuel,
+                parimutuel: d.parimutuel,
+                nullifiers: d.nullifiers,
+                sequencer: d.pool,
+                encryptedMarketId: ENCRYPTED_MARKET_ID,
+                oracleMarketId: ORACLE_MARKET_ID,
+                committeeKeyX: keyX,
+                committeeKeyY: keyY,
+                // A fresh deployment must be at genesis. Anything else means the tree was
+                // touched between construction and here, which should be impossible.
+                expectedRoot: IncrementalMerkleTree(d.tree).root()
+            })
         );
     }
 
