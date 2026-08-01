@@ -68,5 +68,10 @@ circuits/build/gate-*.json
 circuits/build/action-fixtures.json
 circuits/build/*_calldata.json
 
+# Trusted setup ceremony working directory. Intermediate zkeys are passed hand to hand
+# between contributors and are never committed -- `bet_encrypted` alone is 10MB and only the
+# final key matters. The public record is TRANSCRIPT.md, which pins every hash.
+circuits/ceremony/
+
 # OS
 .DS_Store

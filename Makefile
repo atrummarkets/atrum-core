@@ -57,6 +57,13 @@ circuits: ## Compile circuits, run Groth16 setup, export Solidity verifiers
 keygen: ## Generate a BabyJubJub committee keypair (TEST USE ONLY)
 	cd circuits && node scripts/keygen.mjs
 
+# The ceremony is deliberately NOT wired into `circuits`, and CI must never run it. CI
+# regenerates throwaway single-contribution zkeys in every job on purpose -- it tests that a
+# build's two halves agree, not that the keys are trustworthy. See TRANSCRIPT.md.
+.PHONY: ceremony
+ceremony: ## Trusted setup ceremony usage (multi-party). Run BEFORE the final deployment
+	@cd circuits && ./scripts/ceremony.sh || true
+
 .PHONY: prove
 prove: ## Generate proofs and verify the ElGamal mechanism end to end
 	cd circuits && node scripts/prove.mjs
