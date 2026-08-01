@@ -21,6 +21,8 @@ import {BetVerifier} from "../src/verifiers/BetVerifier.sol";
 import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
 import {RedeemPrivateVerifier} from "../src/verifiers/RedeemPrivateVerifier.sol";
 import {WithdrawVerifier} from "../src/verifiers/WithdrawVerifier.sol";
+import {PythResolver} from "../src/PythResolver.sol";
+import {IPyth} from "../src/interfaces/IPyth.sol";
 import {MockERC20} from "../test/mocks/MockERC20.sol";
 
 /// @notice Deploy the Phase 1 stack.
@@ -45,6 +47,24 @@ contract Deploy is Script {
     ///      pointing two markets at one would double-count both.
     uint32 constant ENCRYPTED_MARKET_ID = 8;
 
+    /// @dev An ORACLE-resolved market, alongside the manually-resolved one above.
+    ///
+    ///      Both exist deliberately. Market 8 keeps a human resolver so the recorded fixture
+    ///      lifecycle can still be replayed on demand; market 10 is the shape a real market
+    ///      takes, where the outcome is a computation over signed price data and no address
+    ///      has the power to decide it.
+    uint32 constant ORACLE_MARKET_ID = 10;
+
+    /// @notice Pyth on Monad testnet. VERIFIED LIVE: `getValidTimePeriod()` returns 60 and
+    ///         `getPriceUnsafe` returns a real BTC/USD aggregate at this address.
+    /// @dev Overridable, because this is the one address that differs per chain. The beta
+    ///      feed contract the Monad docs list (`0xad2B…d0B5`) has NO CODE deployed -- checked
+    ///      with `cast code`, which returns `0x` -- so there is no MON/USD feed to point at.
+    address constant PYTH_MONAD_TESTNET = 0x2880aB155794e7179c9eE2e38200202908C17B43;
+
+    /// @notice Pyth's BTC/USD feed id.
+    bytes32 constant BTC_USD = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
+
     uint256 constant DENOM = 1e6;
 
     /// @dev Odds are published hourly, never continuously -- see the contract's notice.
@@ -61,6 +81,8 @@ contract Deploy is Script {
         address depositVerifier;
         address betVerifier;
         address betEncryptedVerifier;
+        address pythResolver;
+        address oracleVault;
         address redeemPrivateVerifier;
         address withdrawVerifier;
         address tree;
@@ -162,6 +184,28 @@ contract Deploy is Script {
         );
     }
 
+    /// @dev The oracle market's schedule, which differs from the others in one way that
+    ///      matters: resolution must open AFTER the price being asked about exists. A vault
+    ///      whose resolution window opens before its own `targetTime` can never be resolved,
+    ///      because no signed update for a future moment exists yet -- and it would then sit
+    ///      unresolvable until `voidMarket` refunds everyone, which is a working system
+    ///      producing a useless market.
+    function _deployOracleVault(address collateral, address resolver, bytes32 specHash) internal returns (address) {
+        uint64 bettingClose = uint64(block.timestamp + 7 days);
+        return address(
+            new Vault(
+                IERC20(collateral),
+                DENOM,
+                resolver,
+                specHash,
+                bettingClose,
+                // targetTime is bettingClose + 30 minutes, so resolution opening at
+                // +2 hours leaves the price comfortably in the past by then.
+                bettingClose + 2 hours
+            )
+        );
+    }
+
     function _deployPool(Deployed memory d, address deployer, address sequencer) internal {
         // The pool's address is needed by the tree, the parimutuel pool and the
         // accumulator, all of which are constructed before it. Predicting keeps every one
@@ -198,6 +242,37 @@ contract Deploy is Script {
         // accumulator to Enc(0) for both outcomes -- see its notice for why that is not left
         // to a separate call.
         pool.registerEncryptedMarket(ENCRYPTED_MARKET_ID, Vault(d.encryptedVault));
+
+        // AN ORACLE-RESOLVED MARKET. This is the shape a real market takes.
+        //
+        // The Vault's resolver is the PythResolver CONTRACT, not a person, and its
+        // `resolutionSpecHash` commits to the exact question before betting opens. After
+        // this call nobody -- not the deployer, not the admin -- can decide the outcome:
+        // it becomes a comparison against a signed price at a committed timestamp, and
+        // anyone at all may trigger it.
+        //
+        // That is also what unblocks user-created markets later. Creation stays admin-only
+        // for now, deliberately, because opening it raises separate questions (who pays to
+        // initialise the accumulator, how market spam is bounded) that are not answered by
+        // having a trustworthy resolver.
+        d.pythResolver = address(new PythResolver(IPyth(vm.envOr("PYTH", PYTH_MONAD_TESTNET))));
+
+        PythResolver.Spec memory oracleSpec = PythResolver.Spec({
+            priceId: BTC_USD,
+            // "Will BTC be above 100,000 at the target time?" 100,000 with Pyth's -8 exponent.
+            threshold: 100_000_00000000,
+            thresholdExpo: -8,
+            // AFTER betting closes, which the resolver enforces -- a market settled on a
+            // price that was knowable while people were still betting is a payout to
+            // whoever checked, not a prediction.
+            targetTime: uint64(block.timestamp + 7 days + 30 minutes),
+            windowSeconds: 60,
+            greaterThan: true
+        });
+
+        d.oracleVault =
+            _deployOracleVault(d.collateral, d.pythResolver, PythResolver(d.pythResolver).hashSpec(oracleSpec));
+        pool.registerEncryptedMarket(ORACLE_MARKET_ID, Vault(d.oracleVault));
 
         // MARKET_ID is a DEPRECATED plaintext market, registered only so `Exercise.s.sol` can
         // replay the recorded fixture lifecycle, whose Merkle tree contains legacy leaves.
@@ -247,6 +322,8 @@ contract Deploy is Script {
         console.log("BetEncryptedVerifier :", d.betEncryptedVerifier);
         console.log("RedeemPrivateVerifier:", d.redeemPrivateVerifier);
         console.log("WithdrawVerifier     :", d.withdrawVerifier);
+        console.log("PythResolver         :", d.pythResolver);
+        console.log("Vault (oracle, mkt 10):", d.oracleVault);
         console.log("IncrementalMerkleTree:", d.tree);
         console.log("ParimutuelPool       :", d.parimutuel);
         console.log("ElGamalAccumulator   :", d.accumulator);

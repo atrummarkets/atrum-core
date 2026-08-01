@@ -129,6 +129,36 @@ contract DeployConfigTest is Test {
         );
     }
 
+    /// @notice The oracle market's outcome is NOT decidable by any address.
+    ///
+    /// @dev The point of the whole resolver. Market 8 keeps a human resolver so the recorded
+    ///      fixtures can be replayed; market 10 is the real shape, where the Vault's resolver
+    ///      is a contract and the answer is a computation over signed price data.
+    function test_deploy_oracleMarketIsResolvedByAContractNotAPerson() public view {
+        Vault oracle = Vault(d.oracleVault);
+
+        assertEq(oracle.resolver(), d.pythResolver, "oracle market is not resolved by the resolver");
+        assertTrue(oracle.resolver().code.length > 0, "resolver is an EOA, so a person decides the outcome");
+        assertTrue(oracle.resolver() != vm.addr(TEST_PK), "the deployer can still decide the outcome");
+        assertTrue(oracle.resolutionSpecHash() != bytes32(0), "no question was committed to");
+    }
+
+    /// @notice The oracle market is registered as ENCRYPTED, so it gets the private path.
+    function test_deploy_oracleMarketIsEncrypted() public view {
+        assertTrue(pool.encryptedMarket(10), "oracle market is not encrypted");
+        assertEq(address(pool.marketVault(10)), d.oracleVault, "oracle market vault not registered");
+    }
+
+    /// @notice Resolution must open AFTER the price being asked about exists, or the market
+    ///         can never be resolved and only `voidMarket` can free it.
+    function test_deploy_oracleMarketResolutionOpensAfterItsTargetTime() public view {
+        Vault oracle = Vault(d.oracleVault);
+        // targetTime is bettingClose + 30 minutes by construction.
+        uint64 targetTime = oracle.bettingCloseTime() + 30 minutes;
+        assertGe(oracle.resolutionStartTime(), targetTime, "resolution opens before the price exists");
+        assertGe(targetTime, oracle.bettingCloseTime(), "target is not after betting closed");
+    }
+
     /// @notice The removed public payout path is gone from the deployed bytecode, not merely
     ///         from the source. Guards against a stale artifact being shipped.
     ///
