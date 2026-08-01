@@ -32,7 +32,41 @@ they are copied here to be preserved).
 - **Cost** 1.95 MON for the deploy (18 txs, 18,606,582 gas), 5.67 MON estimated for the
   exercise run
 
-## Addresses
+## Current deployment (self-verifying, oracle-resolved)
+
+`ShieldedPool` **`0x6af21cA16B40ae5Ab154eE1867f30FC3E64BfBED`** — the first deployment that
+verifies itself before reporting, and the first with a market no address can resolve.
+
+| contract | address |
+|---|---|
+| ShieldedPool | `0x6af21cA16B40ae5Ab154eE1867f30FC3E64BfBED` |
+| ElGamalAccumulator | `0xD80eD1de416aA9C1d4dc6DB28Fd06f9d9c39Ef2a` |
+| EncryptedParimutuelPool | `0x3f6768e883E8FB8465700c69EC99d351f7ADbF34` |
+| PythResolver | `0x9f12dF52CeA11F168E523E3f050bE310051683Fd` |
+| Vault (oracle, market 10) | `0xf6057FBbCE7287Fc808a2692EB1F8db81cc8Ce53` |
+
+Independently re-checked afterwards with `make verify-deployment POOL=0x6af2…`:
+
+```
+DEPLOYMENT OK
+  committee key       : matches circuits/build/committee-key.json
+  legacy markets      : frozen
+  exit path           : bound
+  oracle market 10 resolver is a contract
+```
+
+### RPC limits, measured
+
+| endpoint | `eth_getLogs` range | `eth_call` latency |
+|---|---|---|
+| Monad public | 100 blocks | 1.56s |
+| Alchemy free tier | **9 blocks** | **0.80s** |
+
+Alchemy is twice as fast on ordinary calls and **ten times worse** on log scans. Neither can
+serve a history scan, which is why both off-chain services now read counts and batch
+boundaries from contract STORAGE and make no `getLogs` call at all.
+
+## Addresses (superseded deployments)
 
 | contract | address |
 |---|---|

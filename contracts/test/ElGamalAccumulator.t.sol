@@ -435,4 +435,44 @@ contract ElGamalAccumulatorTest is Test {
         console.log("  fits:", used < HEADROOM ? "YES" : "NO");
         require(used < HEADROOM, string.concat(layout, " accumulate does not fit the envelope headroom"));
     }
+
+    /// @notice The on-chain bet counter increments once per accumulated stake.
+    ///
+    /// @dev The publisher paces itself on this. Its cadence policy gates on how many bets
+    ///      have landed since the last publication -- which is what stops a sequence of
+    ///      published ratios being solvable for individual stakes -- so a counter that does
+    ///      not increment means a publisher that either never publishes or publishes far too
+    ///      often.
+    ///
+    ///      It is stored rather than counted from `StakeAccumulated` logs because NEITHER
+    ///      RPC will serve that scan: Monad's public endpoint caps `eth_getLogs` at 100
+    ///      blocks and Alchemy's free tier at 9, both measured.
+    function test_betCountIncrementsPerAccumulatedStake() public {
+        assertEq(acc.betCount(MARKET_ID), 0, "counter did not start at zero");
+
+        vm.startPrank(pool);
+        acc.accumulateAffine(
+            MARKET_ID,
+            YES,
+            _u(".accumulate.alice.c1[0]"),
+            _u(".accumulate.alice.c1[1]"),
+            _u(".accumulate.alice.c2[0]"),
+            _u(".accumulate.alice.c2[1]")
+        );
+        assertEq(acc.betCount(MARKET_ID), 1, "counter did not increment");
+
+        acc.accumulateAffine(
+            MARKET_ID,
+            YES,
+            _u(".accumulate.carol.c1[0]"),
+            _u(".accumulate.carol.c1[1]"),
+            _u(".accumulate.carol.c2[0]"),
+            _u(".accumulate.carol.c2[1]")
+        );
+        assertEq(acc.betCount(MARKET_ID), 2, "counter did not increment twice");
+        vm.stopPrank();
+
+        // Per market, not global -- the publisher paces each market independently.
+        assertEq(acc.betCount(MARKET_ID + 1), 0, "counter leaked across markets");
+    }
 }

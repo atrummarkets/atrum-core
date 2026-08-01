@@ -47,7 +47,7 @@ import { decide, DEFAULT_POLICY, type RatioPolicy, type MarketState } from "./ra
 
 export const ACCUMULATOR_ABI = parseAbi([
   "function totalAffine(uint32 marketId, uint8 outcome) view returns (uint256 c1x, uint256 c1y, uint256 c2x, uint256 c2y)",
-  "event StakeAccumulated(uint32 indexed marketId, uint8 outcome)",
+  "function betCount(uint32 marketId) view returns (uint256)",
 ]);
 
 export const ENCRYPTED_POOL_ABI = parseAbi([
@@ -64,18 +64,7 @@ export const POOL_ABI = parseAbi(["function marketVault(uint32) view returns (ad
 const OUTCOME_YES = 1;
 const OUTCOME_NO = 2;
 
-/**
- * Blocks behind the tip the bet cursor trails.
- *
- * The cursor is monotonic -- it never re-reads a range -- so a log counted from a block
- * that is later reorged out is counted forever. Trailing the head makes that vanishingly
- * unlikely without needing reorg handling.
- */
-const CONFIRMATIONS = 5n;
 
-/// Monad's public RPC rejects wider ranges outright: "eth_getLogs is limited to a 100 range"
-/// (error -32614). Measured, not assumed.
-const MAX_LOG_RANGE = 100n;
 
 /**
  * BSGS search bound. The circuits range-check `units` to 40 bits, but a POOL total is a sum
@@ -130,15 +119,6 @@ export class Publisher {
   /** betCount at the last publication, per market. Rebuilt from logs on first tick. */
   private readonly betCountAtLastPublish = new Map<number, number>();
 
-  /**
-   * Running bet count per market, plus the block it is accurate through.
-   *
-   * Without this the publisher re-scanned every `StakeAccumulated` log from genesis on
-   * every tick. That is O(chain length) per tick forever: it grows without bound, and it
-   * is exactly the query a public RPC endpoint throttles first. The cursor makes a tick
-   * cost one small range query regardless of how old the market is.
-   */
-  private readonly betCursor = new Map<number, { count: number; throughBlock: bigint }>();
 
   constructor(config: PublisherConfig) {
     this.config = config;
@@ -270,50 +250,27 @@ export class Publisher {
   }
 
   /**
-   * Encrypted bets seen for this market, from `StakeAccumulated` logs.
+   * Encrypted bets accumulated for this market, read from contract STORAGE.
    *
-   * Incremental: only the range since the last tick is queried, and the cursor advances
-   * to a CONFIRMED head rather than the tip. Counting a log from a block that later
-   * reorgs away would permanently overstate the count, and since the count gates
-   * publication cadence, an overstated count means publishing more often than the policy
-   * allows -- which is the leak the policy exists to bound.
+   * It used to count `StakeAccumulated` logs. That cannot work on Monad: the public RPC caps
+   * `eth_getLogs` at a 100-block range and Alchemy's free tier at NINE -- both measured, not
+   * assumed -- while a week-old market spans over a million blocks. Counting from logs would
+   * need six figures of requests on every tick.
+   *
+   * So `ElGamalAccumulator` stores the count. One storage read, no cursor, no chunking, and
+   * no reorg hazard: a reorged block takes the counter back with it, whereas a cursor that
+   * had already counted those logs would have over-counted forever -- and since this gates
+   * publication cadence, over-counting means publishing more often than the policy permits,
+   * which is precisely the leak the policy exists to bound.
    */
   private async countBets(marketId: number): Promise<number> {
-    const head = await this.publicClient.getBlockNumber();
-    const confirmed = head > CONFIRMATIONS ? head - CONFIRMATIONS : 0n;
-
-    const cached = this.betCursor.get(marketId);
-
-    // COLD START DOES NOT SCAN HISTORY. Monad's public RPC caps `eth_getLogs` at a 100-block
-    // range, so walking back to the deploy block would take thousands of requests.
-    //
-    // It does not need to. The count only gates publication CADENCE, and starting from the
-    // current head means a freshly-booted publisher waits for a full quota of NEW bets
-    // before its first publication. That errs toward publishing less, which is the safe
-    // direction -- the leak the policy bounds comes from publishing too OFTEN.
-    const from = cached ? cached.throughBlock + 1n : confirmed;
-
-    // Nothing newly confirmed since last time.
-    if (cached && confirmed < from) return cached.count;
-
-    // Chunked to the RPC's 100-block ceiling. Even an incremental range exceeds it after a
-    // few minutes of downtime, and a host that sleeps idle services produces exactly that.
-    let found = 0;
-    for (let lo = from; lo <= confirmed; lo += MAX_LOG_RANGE) {
-      const hi = lo + MAX_LOG_RANGE - 1n < confirmed ? lo + MAX_LOG_RANGE - 1n : confirmed;
-      const logs = await this.publicClient.getLogs({
-        address: this.config.accumulatorAddress,
-        event: ACCUMULATOR_ABI[1],
-        args: { marketId },
-        fromBlock: lo,
-        toBlock: hi,
-      });
-      found += logs.length;
-    }
-
-    const count = (cached?.count ?? 0) + found;
-    this.betCursor.set(marketId, { count, throughBlock: confirmed });
-    return count;
+    const count = (await this.publicClient.readContract({
+      address: this.config.accumulatorAddress,
+      abi: ACCUMULATOR_ABI,
+      functionName: "betCount",
+      args: [marketId],
+    })) as bigint;
+    return Number(count);
   }
 
   private async isBettingClosed(marketId: number): Promise<boolean> {

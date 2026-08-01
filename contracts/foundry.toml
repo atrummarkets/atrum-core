@@ -40,6 +40,11 @@ runs = 5000
 
 [rpc_endpoints]
 monad_testnet = "https://testnet-rpc.monad.xyz"
+
+# Private endpoint, from MONAD_RPC_URL in .env. Prefer this for anything that broadcasts:
+# the public one rate-limits, and it caps eth_getLogs at a 100-block range. Kept as a
+# SEPARATE alias rather than overriding monad_testnet so CI, which has no .env, still works.
+monad_private = "${MONAD_RPC_URL}"
 monad_mainnet = "https://rpc.monad.xyz"
 
 # Source verification. Monad testnet has no Etherscan-style API (`etherscanAPI: false`

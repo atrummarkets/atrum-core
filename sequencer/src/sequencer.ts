@@ -115,10 +115,11 @@ export class Sequencer {
 
     // Batch boundaries come from CONTRACT STORAGE, not from `BatchInserted` logs.
     //
-    // Monad's public RPC caps `eth_getLogs` at a 100-block range (error -32614). A market a
-    // week old spans over a million blocks, so a log-based rebuild would need tens of
-    // thousands of requests and be rate-limited long before finishing. Since a restart must
-    // complete before any Merkle path can be served, that is an outage, not a slow boot.
+    // NEITHER RPC will serve a log-based rebuild. Measured: Monad's public endpoint caps
+    // `eth_getLogs` at a 100-block range (error -32614), and Alchemy's free tier at NINE. A
+    // week-old market spans over a million blocks, so it would need six figures of requests
+    // and be rate-limited long before finishing -- and a restart must complete before any
+    // Merkle path can be served, so that is an outage, not a slow boot.
     //
     // `insertedCount` and `tree.nextIndex()` give the totals but not the DISTRIBUTION of
     // real leaves across batches -- and that distribution decides where every filler sits.
