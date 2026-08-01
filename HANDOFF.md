@@ -1,9 +1,181 @@
 # Atrum — Handoff
 
-**As of 30 July 2026.** What has been claimed, what has actually been verified, and
+**As of 2 August 2026.** What has been claimed, what has actually been verified, and
 what stands between here and hosting a real private prediction market.
 
 Written to be read by someone who has not seen the earlier conversation.
+
+---
+
+## NEXT UP — start here
+
+The protocol is done and proven on chain. Two tracks are open, they are independent, and
+one of them has an irreducible wait, so start it first even though it is the smaller job.
+
+### 1. Get the browser number. One command, and it unblocks everything else.
+
+`atrum-client/` is built and its assets are synced. Nobody has opened it in a browser, so
+**the browser proving multiplier is still unmeasured** — the single number that decides the
+whole client architecture.
+
+```bash
+cd ../atrum-client
+npm install                 # first time only
+npm run sync                # re-copy artefacts if atrum-core was rebuilt since
+npm run baseline            # Node timings on THIS machine — do not skip, see §0-bis
+npm run harness             # then open http://localhost:8080/harness.html and click Run
+```
+
+Expect `bet_encrypted` to dominate: 11.8MB to download and, on this machine, 897ms to prove
+under Node. Record what the browser does in §0-bis's table.
+
+**Then, and only then**, make the architecture call. Two decisions, and only one of them is
+actually gated on the number:
+
+- **Web Worker: gated.** If `fullProve` stalls the main thread long enough to freeze the UI —
+  likely at `bet_encrypted`'s size regardless of the raw multiplier — a worker is mandatory.
+  The harness deliberately yields before proving so you can watch whether the row paints.
+- **IndexedDB caching: not gated.** 30MB is too much to re-download per session whatever the
+  prove time is. Build it either way.
+
+Then the client itself: lazy-load per action (deposit + `bet_encrypted` = 14.2MB to place a
+first bet), witness building from real notes rather than the canned fixtures, Merkle paths
+from the sequencer's `GET /path?commitment=0x…`, and amount snapping to `Denominations.sol`'s
+powers-of-ten ladder.
+
+**One blocker to clear before the client can talk to the sequencer:** `sequencer/src/main.ts`
+sets no CORS headers, so a browser on another origin cannot read `/path`. Two `writeHead`
+calls. The harness does not need this — it runs entirely off local fixtures.
+
+### 2. Start the ceremony now, because it waits on people
+
+The script is written and rehearsed (§0-bis). What is left is not code:
+
+- **Who contributes.** Ideally people outside the team — the claim is "not all of them
+  colluded", and that is weaker if they are all you.
+- **How many.** 5–10 is defensible for a testnet MVP.
+- **Which beacon block closes it.** Announce it in `TRANSCRIPT.md` *before* it is mined.
+- **Where contributors post their hashes** at the time, under their own name.
+
+Then it is one command each, a few minutes apiece, passed hand to hand:
+
+```bash
+make ceremony                                   # usage
+./circuits/scripts/ceremony.sh init <circuit>   # coordinator, once per circuit
+./circuits/scripts/ceremony.sh contribute <circuit> <in> <out> "<name>"
+./circuits/scripts/ceremony.sh finalize <circuit> <last> <beacon-block-hash>
+```
+
+⚠️ **Ordering is the part that costs a day if you get it wrong.** New zkeys mean new
+verification keys mean regenerated Solidity verifiers mean every contract is redeployed.
+**Ceremony first, then deploy once.** Doing it the other way round means deploying twice.
+
+The ceremony does **not** block the frontend. Track 1 measures performance, not security;
+today's single-contribution keys are fine for that.
+
+### Gotchas that will each cost you a day
+
+- **`make circuits` is never a standalone step.** It regenerates every zkey, which orphans
+  the Groth16 proofs in `action-fixtures.json` and the exported verifiers. Always follow with
+  `make verifiers && make fixtures && make test`.
+- **Always `make fixtures`, never a generator directly** — and note you *cannot* revert
+  `e2e-`/`settlement-fixtures.json` on their own. They carry DLEQ proofs bound to ciphertexts
+  in the gitignored `action-fixtures.json`. §0-bis has the demonstration.
+- **Local `forge` gas understates real by 32–55%.** Every local figure is a lower bound.
+- **`eth_getLogs` caps at 100 blocks** (public) / 9 (Alchemy free). Never build on log
+  scanning; read state.
+- **Denominations are enforced on-chain** — powers of ten only. A deposit of 137 reverts.
+- **After any deploy:** `make verify-deployment POOL=0x…` and `make verify-mirror POOL=0x…`.
+
+### Still open, deliberately not started
+
+**Threshold committee (3-of-5).** One key decrypts every bet today. `ChaumPedersen.sol` is
+already built for it and `EncryptedParimutuelPool.sol` notes the swap changes how `D` is
+produced but not a line of the verification.
+
+**Fixture-lifecycle rewrite.** Mechanical, blocks nothing, shrinks audit surface — deletes
+`registerMarket`, `bet()`, `ParimutuelPool` and the plaintext verifiers, leaving one market
+type and one exit.
+
+---
+
+## 0-bis. What changed on 2026-08-02
+
+Two tracks opened in parallel, per §0's "next up": the browser proving harness and the
+trusted setup ceremony. Neither is finished; both are now startable by someone else.
+
+### `atrum-client` — a new sibling repo, harness first
+
+The frontend starts as a measuring instrument, not a UI. `atrum-client/` holds a static
+harness (`harness.html` + `harness.js`, no bundler, following `atrum-zk-poc/web`'s pattern)
+that fetches each circuit's wasm and zkey, proves the canned input from
+`witness-inputs.json`, **verifies the result**, and reports download size, prove time and a
+rough heap delta. `scripts/sync-assets.sh` copies artefacts out of this repo — scripted,
+because atrum-zk-poc's hand-`cp`'d `web/vendor/` has no record of what built it.
+
+**[UNMEASURED] The browser multiplier is still unmeasured.** The harness is built and its
+assets serve, but nothing has opened it in a browser. That number remains the open question
+it was; running it is one command (`npm run harness`) and a click.
+
+### [MEASURED] Node proving is ~2x faster on this machine than §0 records
+
+`npm run baseline` re-measures Node proving locally, because a multiplier is meaningless if
+its two halves come from different machines:
+
+| circuit | §0 (HANDOFF) | this machine | drift |
+|---|---|---|---|
+| `deposit` | 322ms | **365ms** | +13% |
+| `bet_encrypted` | 2,255ms | **897ms** | **−60%** |
+| `redeem_private` | 1,437ms | **545ms** | −62% |
+| `withdraw` | 1,411ms | **620ms** | −56% |
+
+Dividing a browser time measured here by §0's Node numbers would have **understated the
+browser multiplier by about 2x** — in the unsafe direction, again. The harness now reads a
+locally-measured baseline and says which one it used.
+
+Full-client download re-measured at **30MB** across the four circuits, confirming §0's 29.8MB.
+
+### The ceremony is scripted and rehearsed, not started
+
+`circuits/scripts/ceremony.sh` (`init` / `contribute` / `finalize` / `verify`), deliberately
+separate from `build.sh` — CI must keep minting throwaway single-contribution keys, because
+it tests that a build's halves agree, not that the keys are trustworthy. `finalize` applies
+the beacon, then **hard-fails and deletes its output** if `snarkjs zkey verify` does not pass.
+
+[MEASURED] The whole flow was rehearsed on `deposit`: `init` → two contributions → beacon
+(real Monad testnet block 50,039,157) → verify → install, and the result went through
+`make verifiers && make fixtures && make test` with **246 tests passing, unchanged**. That
+closes the question of whether ceremony output needs special handling downstream: it does
+not. The rehearsal keys have known entropy and are worthless; the real ceremony starts from a
+fresh `init`.
+
+`TRANSCRIPT.md` is the public record. **What remains is not code** — who contributes, how
+many, which beacon block, where they post their hashes. See §4's "before real money."
+
+### [FIXED] A stale committee key, silently reused, and the same shape as bug #2
+
+`build.sh` regenerated the committee key only when the file was **absent**. This machine held
+a random key from 30 July, predating the pinned seed — so every build silently used it. Nothing
+failed: the circuits compiled, the fixtures regenerated against the same stale key, and all
+246 tests passed. The only visible symptom was that committed key-dependent fixtures diffed
+for no apparent reason.
+
+That is bug #2's shape exactly — a key that goes stale without anything announcing it, which
+on testnet produced a market that could never settle. `keygen.mjs --check` now asserts the
+on-disk key matches the pinned derivation, and `build.sh` runs it on every build.
+`ATRUM_RANDOM_KEY=1` still opts out.
+
+### [CONFIRMED] The fixture coupling, demonstrated rather than described
+
+§0's gotcha — *"always make fixtures, never a generator directly"* — was tested by trying to
+revert the committed `e2e-` and `settlement-fixtures.json` independently. It fails
+immediately with `InvalidDecryptionProof()`: those files carry DLEQ proofs bound to
+ciphertexts living in the **gitignored** `action-fixtures.json`, which is regenerated with
+fresh randomness every run.
+
+The practical consequence, which is worth knowing before it confuses someone: **`make
+fixtures` always dirties the working tree**, and those two committed files cannot be reverted
+on their own. They are only ever valid as a set with the untracked artefacts beside them.
 
 ---
 
