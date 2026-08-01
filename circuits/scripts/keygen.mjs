@@ -11,7 +11,7 @@
  * with this RNG, for anything holding value.
  */
 import { buildBabyjub } from "circomlibjs";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 
 const babyJub = await buildBabyjub();
@@ -29,7 +29,42 @@ function randomScalar() {
   }
 }
 
-const secret = randomScalar();
+/**
+ * PINNED test secret, derived from a public seed by counter-hashing until in range.
+ *
+ * This key is PUBLIC and therefore WORTHLESS as a secret -- anyone reading this file can
+ * decrypt every pool encrypted under it. That is already true of any key this script
+ * produces: it is a single-party key held on one machine, and Phase 2 ships "a single
+ * decryption key, disclosed plainly" by design. Pinning changes reproducibility, not
+ * security.
+ *
+ * What it fixes: a random key made `committee_key.circom` -- and therefore the compiled
+ * circuits -- differ per machine, so committed key-dependent fixtures could not match a
+ * fresh checkout. With this pinned, the circuit, the fixtures and the on-chain
+ * `EncryptedParimutuelPool` constructor all agree everywhere.
+ *
+ * Set `ATRUM_RANDOM_KEY=1` to get a fresh random key instead. A real deployment uses
+ * neither path -- it uses a key from an actual ceremony.
+ */
+function pinnedScalar(seed) {
+  for (let counter = 0; ; counter++) {
+    const digest = createHash("sha256").update(`${seed}:${counter}`).digest("hex");
+    const candidate = BigInt("0x" + digest);
+    if (candidate > 0n && candidate < SUBGROUP_ORDER) return candidate;
+  }
+}
+
+const PINNED_SEED = "atrum-test-committee-key-v1-PUBLIC-DO-NOT-USE-IN-PRODUCTION";
+
+const useRandom = process.env.ATRUM_RANDOM_KEY === "1";
+const secret = useRandom ? randomScalar() : pinnedScalar(PINNED_SEED);
+
+if (useRandom) {
+  console.log("ATRUM_RANDOM_KEY=1 -- generating a FRESH key.");
+  console.log("Committed key-dependent fixtures will no longer match. Regenerate them.\n");
+} else {
+  console.log("using the PINNED test key (public, reproducible, worthless as a secret)\n");
+}
 
 // H = [secret] * G, where G is the canonical order-8 base point circomlib uses.
 const H = babyJub.mulPointEscalar(babyJub.Base8, secret);

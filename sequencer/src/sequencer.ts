@@ -35,6 +35,8 @@ import {
 import {
   CommitmentTree,
   BATCH_SIZE,
+  rebuildBatches,
+  type GraftedBatch,
   FIELD_SIZE,
   initHasher,
   derivedFiller,
@@ -50,6 +52,8 @@ export const POOL_ABI = parseAbi([
   "function pendingCommitments(uint256) view returns (uint256)",
   "function flushBatch(uint256[] calldata leaves)",
   "function BATCH_SIZE() view returns (uint256)",
+  "function batchCount() view returns (uint256)",
+  "function batchRealCounts(uint256) view returns (uint32)",
 ]);
 
 /**
@@ -69,6 +73,11 @@ export interface SequencerConfig {
   mnemonic: string;
   /** Graft a padded batch after this long, even if fewer than 64 are queued. */
   maxBatchDelayMs?: number;
+  /**
+   * Block the pool was deployed at. Without it `resync` scans logs from genesis, which
+   * public RPC endpoints rate-limit or refuse outright.
+   */
+  deployBlock?: bigint;
 }
 
 export class Sequencer {
@@ -100,16 +109,60 @@ export class Sequencer {
    * that never existed, and every proof built from them fails.
    */
   async resync(): Promise<void> {
-    const inserted = await this.read("insertedCount");
+    const inserted = Number(await this.read("insertedCount"));
+    this.tree.reset();
+    if (inserted === 0) return;
 
-    const leaves: bigint[] = [];
-    for (let i = 0n; i < inserted; i++) {
-      leaves.push(await this.read("pendingCommitments", [i]));
-    }
+    // Batch boundaries come from CONTRACT STORAGE, not from `BatchInserted` logs.
+    //
+    // NEITHER RPC will serve a log-based rebuild. Measured: Monad's public endpoint caps
+    // `eth_getLogs` at a 100-block range (error -32614), and Alchemy's free tier at NINE. A
+    // week-old market spans over a million blocks, so it would need six figures of requests
+    // and be rate-limited long before finishing -- and a restart must complete before any
+    // Merkle path can be served, so that is an outage, not a slow boot.
+    //
+    // `insertedCount` and `tree.nextIndex()` give the totals but not the DISTRIBUTION of
+    // real leaves across batches -- and that distribution decides where every filler sits.
+    // So the contract stores it.
+    const batchTotal = Number(await this.read("batchCount"));
 
-    for (let i = 0; i < leaves.length; i += BATCH_SIZE) {
-      this.tree.insertBatch(leaves.slice(i, i + BATCH_SIZE));
+    const counts = await Promise.all(
+      Array.from({ length: batchTotal }, (_, i) => this.read("batchRealCounts", [BigInt(i)])),
+    );
+
+    const batches: GraftedBatch[] = counts.map((count, i) => ({
+      // Batches are always BATCH_SIZE leaves and always aligned, so the graft index is
+      // implied by position -- it does not need storing.
+      startIndex: BigInt(i * BATCH_SIZE),
+      count: Number(count),
+    }));
+
+    const queued = await this.readQueued(inserted);
+    for (const batch of rebuildBatches(batches, queued)) {
+      this.tree.insertBatch(batch);
     }
+  }
+
+  /**
+   * Read the first `count` queued commitments.
+   *
+   * Chunked and parallel rather than a serial `await` per leaf. The serial version cost one
+   * RPC round-trip per commitment ever inserted, so a restart went as O(n) network calls --
+   * minutes on a market of any size, during which no Merkle path can be served and
+   * therefore no user can build a proof. A restart is not a rare event on a host that
+   * sleeps idle services.
+   */
+  private async readQueued(count: number): Promise<bigint[]> {
+    const CHUNK = 64;
+    const out: bigint[] = [];
+    for (let i = 0; i < count; i += CHUNK) {
+      const end = Math.min(i + CHUNK, count);
+      const chunk = await Promise.all(
+        Array.from({ length: end - i }, (_, k) => this.read("pendingCommitments", [BigInt(i + k)])),
+      );
+      out.push(...chunk);
+    }
+    return out;
   }
 
   private async read(fn: string, args: readonly unknown[] = []): Promise<bigint> {

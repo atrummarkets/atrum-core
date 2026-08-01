@@ -21,6 +21,15 @@ circuits/build/*.r1cs
 circuits/build/*.sym
 circuits/build/*.wasm
 circuits/build/*.zkey
+
+# Verification keys are DERIVED from the zkeys, which are not reproducible: `zkey
+# contribute` mixes its own randomness even with fixed `-e` entropy (measured), and that
+# non-determinism is a security property rather than a defect. So a committed vkey only
+# matches the machine that built it. They were committed once, and the result was a third
+# of the test suite failing with InvalidProof() on a clean pull -- committed vkeys against
+# locally-built zkeys. CI never caught it because CI regenerates both in the same run.
+# `make circuits` regenerates these; do not commit them.
+circuits/build/*_vkey.json
 circuits/build/*_verifier.sol
 circuits/build/*_proof.json
 # Exception, committed deliberately: padding-exploit.json pins the exact attack that

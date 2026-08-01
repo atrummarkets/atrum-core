@@ -16,7 +16,6 @@ import {ChaumPedersen} from "../src/ChaumPedersen.sol";
 import {ShieldedPool, IDepositVerifier, IActionVerifier, IActionVerifier8} from "../src/ShieldedPool.sol";
 import {DepositVerifier} from "../src/verifiers/DepositVerifier.sol";
 import {BetVerifier} from "../src/verifiers/BetVerifier.sol";
-import {RedeemVerifier} from "../src/verifiers/RedeemVerifier.sol";
 import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
 
 /// @notice The step that moves money in Phase 2, attacked rather than demonstrated.
@@ -75,7 +74,6 @@ contract EncryptedParimutuelPoolTest is Test {
 
         DepositVerifier dv = new DepositVerifier();
         BetVerifier bv = new BetVerifier();
-        RedeemVerifier rv = new RedeemVerifier();
         BetEncryptedVerifier bev = new BetEncryptedVerifier();
 
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 4);
@@ -91,7 +89,6 @@ contract EncryptedParimutuelPoolTest is Test {
             accumulator,
             IDepositVerifier(address(dv)),
             IActionVerifier(address(bv)),
-            IActionVerifier(address(rv)),
             IActionVerifier8(address(bev)),
             sequencer,
             address(this)

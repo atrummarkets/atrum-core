@@ -64,13 +64,16 @@ prove: ## Generate proofs and verify the ElGamal mechanism end to end
 .PHONY: fixtures
 fixtures: ## Real deposit/bet/redeem proofs for the Solidity suite to replay
 	cd circuits && node scripts/gen_action_fixtures.mjs
+	cd circuits && node scripts/gen_settlement_fixtures.mjs
+	# Must run AFTER gen_action_fixtures: it settles the ciphertext those real bets produced.
+	cd circuits && node scripts/gen_e2e_fixtures.mjs
 
 .PHONY: verifiers
 verifiers: ## Copy generated verifiers into contracts/src/verifiers and build
 	@mkdir -p contracts/src/verifiers
 	@for pair in "probe_fixed_key:FixedKeyVerifier" "probe_pubkey_input:PubKeyInputVerifier" \
 	             "deposit:DepositVerifier" "bet:BetVerifier" "redeem:RedeemVerifier" \
-	             "bet_encrypted:BetEncryptedVerifier"; do \
+	             "bet_encrypted:BetEncryptedVerifier" "redeem_private:RedeemPrivateVerifier" "withdraw:WithdrawVerifier"; do \
 		src="$${pair%%:*}"; name="$${pair##*:}"; \
 		sed "s/contract Groth16Verifier/contract $$name/" \
 			"circuits/build/$${src}_verifier.sol" > "contracts/src/verifiers/$${name}.sol"; \
@@ -111,3 +114,39 @@ clean: ## Remove build artefacts (keeps the downloaded ptau)
 	rm -rf contracts/out contracts/cache
 	rm -rf circuits/build/*_js circuits/build/*.r1cs circuits/build/*.sym \
 	       circuits/build/*.zkey circuits/build/*_verifier.sol
+
+# Required = 3.58 MON, measured against live testnet (17,606,694 gas @ 203 gwei) with a
+# margin for the exercise transactions that follow the deploy.
+TESTNET_REQUIRED_WEI := 5000000000000000000
+
+.PHONY: testnet-preflight
+testnet-preflight: ## Check the deploy key is set and funded, WITHOUT broadcasting
+	@cd contracts && set -a && . ./.env && set +a && \
+	if [ -z "$$PRIVATE_KEY" ]; then \
+	  echo "PRIVATE_KEY is empty in contracts/.env -- see contracts/.env.example"; exit 1; fi && \
+	ADDR=$$(cast wallet address --private-key $$PRIVATE_KEY) && \
+	BAL=$$(cast balance $$ADDR --rpc-url https://testnet-rpc.monad.xyz) && \
+	echo "deployer : $$ADDR" && \
+	echo "balance  : $$(cast to-unit $$BAL ether) MON" && \
+	echo "required : 3.58 MON deploy + margin  (5 MON recommended)" && \
+	python3 -c "import sys; sys.exit(0 if int(sys.argv[1]) >= int(sys.argv[2]) else 1)" \
+	  "$$BAL" "$(TESTNET_REQUIRED_WEI)" || \
+	  { echo "UNDERFUNDED -- get testnet MON at https://faucet.monad.xyz"; exit 1; } && \
+	echo "OK -- run 'make testnet-deploy'"
+
+.PHONY: testnet-deploy
+testnet-deploy: testnet-preflight ## BROADCAST the deployment to Monad testnet (spends real testnet MON)
+	cd contracts && forge script script/Deploy.s.sol \
+	  --rpc-url monad_testnet --network monad --broadcast --slow -vv
+
+.PHONY: verify-deployment
+verify-deployment: ## Check a LIVE deployment against every invariant (POOL=0x..)
+	@test -n "$(POOL)" || { echo "usage: make verify-deployment POOL=0x..."; exit 1; }
+	cd contracts && POOL=$(POOL) forge script script/VerifyDeployment.s.sol \
+	  --rpc-url monad_testnet --network monad
+
+.PHONY: verify-mirror
+verify-mirror: ## Rebuild the tree mirror from chain and assert it matches (POOL=0x..)
+	@test -n "$(POOL)" || { echo "usage: make verify-mirror POOL=0x..."; exit 1; }
+	cd contracts && set -a && . ./.env && set +a && cd ../sequencer && \
+	  POOL=$(POOL) npm run --silent verify:mirror

@@ -7,13 +7,23 @@ import {IERC20} from "../src/interfaces/IERC20.sol";
 import {IncrementalMerkleTree, IPoseidonT3} from "../src/IncrementalMerkleTree.sol";
 import {MappingNullifierSet} from "../src/MappingNullifierSet.sol";
 import {ParimutuelPool} from "../src/ParimutuelPool.sol";
-import {ShieldedPool, IDepositVerifier, IActionVerifier, IActionVerifier8} from "../src/ShieldedPool.sol";
+import {
+    ShieldedPool,
+    IDepositVerifier,
+    IActionVerifier,
+    IActionVerifier8,
+    IEncryptedTotals
+} from "../src/ShieldedPool.sol";
 import {ElGamalAccumulator} from "../src/ElGamalAccumulator.sol";
 import {EncryptedParimutuelPool} from "../src/EncryptedParimutuelPool.sol";
 import {DepositVerifier} from "../src/verifiers/DepositVerifier.sol";
 import {BetVerifier} from "../src/verifiers/BetVerifier.sol";
-import {RedeemVerifier} from "../src/verifiers/RedeemVerifier.sol";
 import {BetEncryptedVerifier} from "../src/verifiers/BetEncryptedVerifier.sol";
+import {RedeemPrivateVerifier} from "../src/verifiers/RedeemPrivateVerifier.sol";
+import {WithdrawVerifier} from "../src/verifiers/WithdrawVerifier.sol";
+import {PythResolver} from "../src/PythResolver.sol";
+import {IPyth} from "../src/interfaces/IPyth.sol";
+import {DeploymentInvariants} from "../src/DeploymentInvariants.sol";
 import {MockERC20} from "../test/mocks/MockERC20.sol";
 
 /// @notice Deploy the Phase 1 stack.
@@ -38,16 +48,25 @@ contract Deploy is Script {
     ///      pointing two markets at one would double-count both.
     uint32 constant ENCRYPTED_MARKET_ID = 8;
 
-    uint256 constant DENOM = 1e6;
-
-    /// @dev The disclosed committee key, from `circuits/build/committee-key.json`. Phase 2
-    ///      ships a single key in the open -- the privacy claim rests on the ciphertext,
-    ///      not on hiding whose key it is.
+    /// @dev An ORACLE-resolved market, alongside the manually-resolved one above.
     ///
-    ///      TEST KEY. Its secret sits in a gitignored file on a developer machine, so it
-    ///      protects nothing. A real deployment needs a key from a real ceremony.
-    uint256 constant COMMITTEE_KEY_X = 14545821346199784731385379243674827736685806786607247717851455121430969226259;
-    uint256 constant COMMITTEE_KEY_Y = 4655410101393361897096692429781085479578088917846952746595496973362008687944;
+    ///      Both exist deliberately. Market 8 keeps a human resolver so the recorded fixture
+    ///      lifecycle can still be replayed on demand; market 10 is the shape a real market
+    ///      takes, where the outcome is a computation over signed price data and no address
+    ///      has the power to decide it.
+    uint32 constant ORACLE_MARKET_ID = 10;
+
+    /// @notice Pyth on Monad testnet. VERIFIED LIVE: `getValidTimePeriod()` returns 60 and
+    ///         `getPriceUnsafe` returns a real BTC/USD aggregate at this address.
+    /// @dev Overridable, because this is the one address that differs per chain. The beta
+    ///      feed contract the Monad docs list (`0xad2B…d0B5`) has NO CODE deployed -- checked
+    ///      with `cast code`, which returns `0x` -- so there is no MON/USD feed to point at.
+    address constant PYTH_MONAD_TESTNET = 0x2880aB155794e7179c9eE2e38200202908C17B43;
+
+    /// @notice Pyth's BTC/USD feed id.
+    bytes32 constant BTC_USD = 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
+
+    uint256 constant DENOM = 1e6;
 
     /// @dev Odds are published hourly, never continuously -- see the contract's notice.
     uint256 constant MIN_PUBLISH_INTERVAL = 1 hours;
@@ -62,8 +81,11 @@ contract Deploy is Script {
         address encryptedVault;
         address depositVerifier;
         address betVerifier;
-        address redeemVerifier;
         address betEncryptedVerifier;
+        address pythResolver;
+        address oracleVault;
+        address redeemPrivateVerifier;
+        address withdrawVerifier;
         address tree;
         address parimutuel;
         address accumulator;
@@ -72,7 +94,7 @@ contract Deploy is Script {
         address pool;
     }
 
-    function run() external {
+    function run() external returns (Deployed memory d) {
         uint256 pk = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(pk);
         address sequencer = vm.envOr("SEQUENCER", deployer);
@@ -82,7 +104,6 @@ contract Deploy is Script {
 
         vm.startBroadcast(pk);
 
-        Deployed memory d;
         d.poseidon = _deployPoseidon();
         d.collateral = _deployCollateral(deployer);
         d.vault = _deployVault(d.collateral, deployer);
@@ -90,12 +111,19 @@ contract Deploy is Script {
 
         d.depositVerifier = address(new DepositVerifier());
         d.betVerifier = address(new BetVerifier());
-        d.redeemVerifier = address(new RedeemVerifier());
         d.betEncryptedVerifier = address(new BetEncryptedVerifier());
+        d.redeemPrivateVerifier = address(new RedeemPrivateVerifier());
+        d.withdrawVerifier = address(new WithdrawVerifier());
 
         _deployPool(d, deployer, sequencer);
 
         vm.stopBroadcast();
+
+        // VERIFY BEFORE REPORTING. Inside `run()` rather than in a test, because
+        // `forge script --broadcast` does not run tests -- and both deployment bugs this
+        // project has shipped were invisible to a 200-test suite for exactly that reason.
+        // A broken deployment now reverts instead of printing a tidy address list.
+        _verify(d);
 
         _report(d);
     }
@@ -106,8 +134,51 @@ contract Deploy is Script {
         return address(usdc);
     }
 
+    /// @notice The disclosed committee decryption key.
+    ///
+    /// @dev READ, NEVER HARDCODED. This used to be a pair of constants copied out of
+    ///      `circuits/build/committee-key.json`. That file is REGENERATED by `make keygen`,
+    ///      so the constants silently went stale, and the first testnet deployment shipped a
+    ///      committee key nobody holds the secret for.
+    ///
+    ///      The consequence was not cosmetic. `publishFinalTotals` requires a
+    ///      Chaum-Pedersen proof that the decryption share matches the committee key, so a
+    ///      market deployed against the wrong key can NEVER be settled -- and a market that
+    ///      cannot settle cannot pay out. Bets in, nothing out. It surfaced as
+    ///      `InvalidDecryptionProof()` on a real testnet settlement attempt.
+    ///
+    ///      `COMMITTEE_KEY_X`/`_Y` in the environment override the file, which is how a real
+    ///      ceremony key gets in without the artifact being present at all.
+    ///
+    ///      Phase 2 ships a single key in the open on purpose -- the privacy claim rests on
+    ///      the ciphertext, not on hiding whose key it is. But the file's secret sits on a
+    ///      developer machine, so it protects nothing. A real deployment needs a ceremony.
+    function _committeeKey() internal view returns (uint256 x, uint256 y) {
+        x = vm.envOr("COMMITTEE_KEY_X", uint256(0));
+        y = vm.envOr("COMMITTEE_KEY_Y", uint256(0));
+        if (x != 0 && y != 0) return (x, y);
+
+        string memory json = vm.readFile("../circuits/build/committee-key.json");
+        x = vm.parseJsonUint(json, ".pubKey[0]");
+        y = vm.parseJsonUint(json, ".pubKey[1]");
+        if (x == 0 || y == 0) revert("committee key is zero -- run `make keygen`");
+    }
+
+    /// @dev `EXERCISE_MODE=1` back-dates the schedule so betting is already closed and the
+    ///      market can be resolved immediately. That is the only way to drive the full
+    ///      lifecycle -- settle, redeemPrivate, withdraw -- through a real chain, where
+    ///      `vm.warp` does not exist and the default schedule is seven days out.
+    ///
+    ///      TESTNET ONLY. A back-dated market accepts no bets, because betting closed before
+    ///      it was deployed. It exists to measure gas on the exit path, not to trade.
     function _deployVault(address collateral, address deployer) internal returns (address) {
-        uint64 bettingClose = uint64(block.timestamp + 7 days);
+        bool exercise = vm.envOr("EXERCISE_MODE", uint256(0)) == 1;
+        // Betting must still be OPEN when the exercise places its bets, and resolution
+        // cannot begin until MIN_RESOLUTION_GAP (1 hour) after betting closes -- the Vault
+        // constructor enforces that, and it is a safety invariant rather than a knob. So the
+        // shortest honest schedule is a few minutes of betting followed by a one-hour wait,
+        // which is why the exercise runs in two phases.
+        uint64 bettingClose = exercise ? uint64(block.timestamp + 6 minutes) : uint64(block.timestamp + 7 days);
         return address(
             new Vault(
                 IERC20(collateral),
@@ -115,6 +186,28 @@ contract Deploy is Script {
                 deployer,
                 keccak256("Will Atrum ship Phase 2? -- resolves manually, testnet only"),
                 bettingClose,
+                exercise ? bettingClose + 1 hours : bettingClose + 2 hours
+            )
+        );
+    }
+
+    /// @dev The oracle market's schedule, which differs from the others in one way that
+    ///      matters: resolution must open AFTER the price being asked about exists. A vault
+    ///      whose resolution window opens before its own `targetTime` can never be resolved,
+    ///      because no signed update for a future moment exists yet -- and it would then sit
+    ///      unresolvable until `voidMarket` refunds everyone, which is a working system
+    ///      producing a useless market.
+    function _deployOracleVault(address collateral, address resolver, bytes32 specHash) internal returns (address) {
+        uint64 bettingClose = uint64(block.timestamp + 7 days);
+        return address(
+            new Vault(
+                IERC20(collateral),
+                DENOM,
+                resolver,
+                specHash,
+                bettingClose,
+                // targetTime is bettingClose + 30 minutes, so resolution opening at
+                // +2 hours leaves the price comfortably in the past by then.
                 bettingClose + 2 hours
             )
         );
@@ -143,7 +236,6 @@ contract Deploy is Script {
             ElGamalAccumulator(d.accumulator),
             IDepositVerifier(d.depositVerifier),
             IActionVerifier(d.betVerifier),
-            IActionVerifier(d.redeemVerifier),
             IActionVerifier8(d.betEncryptedVerifier),
             sequencer,
             deployer
@@ -153,18 +245,103 @@ contract Deploy is Script {
 
         MappingNullifierSet(d.nullifiers).bindPool(d.pool);
 
-        // Both modes, so a deployment exercises the Phase 1 and Phase 2 paths side by
-        // side. `registerEncryptedMarket` also initialises the accumulator to Enc(0) for
-        // both outcomes -- see its notice for why that is not left to a separate call.
-        pool.registerMarket(MARKET_ID, Vault(d.vault));
+        // The encrypted market is the product. `registerEncryptedMarket` also initialises the
+        // accumulator to Enc(0) for both outcomes -- see its notice for why that is not left
+        // to a separate call.
         pool.registerEncryptedMarket(ENCRYPTED_MARKET_ID, Vault(d.encryptedVault));
+
+        // AN ORACLE-RESOLVED MARKET. This is the shape a real market takes.
+        //
+        // The Vault's resolver is the PythResolver CONTRACT, not a person, and its
+        // `resolutionSpecHash` commits to the exact question before betting opens. After
+        // this call nobody -- not the deployer, not the admin -- can decide the outcome:
+        // it becomes a comparison against a signed price at a committed timestamp, and
+        // anyone at all may trigger it.
+        //
+        // That is also what unblocks user-created markets later. Creation stays admin-only
+        // for now, deliberately, because opening it raises separate questions (who pays to
+        // initialise the accumulator, how market spam is bounded) that are not answered by
+        // having a trustworthy resolver.
+        d.pythResolver = address(new PythResolver(IPyth(vm.envOr("PYTH", PYTH_MONAD_TESTNET))));
+
+        PythResolver.Spec memory oracleSpec = PythResolver.Spec({
+            priceId: BTC_USD,
+            // "Will BTC be above 100,000 at the target time?" 100,000 with Pyth's -8 exponent.
+            threshold: 100_000_00000000,
+            thresholdExpo: -8,
+            // AFTER betting closes, which the resolver enforces -- a market settled on a
+            // price that was knowable while people were still betting is a payout to
+            // whoever checked, not a prediction.
+            targetTime: uint64(block.timestamp + 7 days + 30 minutes),
+            windowSeconds: 60,
+            greaterThan: true
+        });
+
+        d.oracleVault =
+            _deployOracleVault(d.collateral, d.pythResolver, PythResolver(d.pythResolver).hashSpec(oracleSpec));
+        pool.registerEncryptedMarket(ORACLE_MARKET_ID, Vault(d.oracleVault));
+
+        // MARKET_ID is a DEPRECATED plaintext market, registered only so `Exercise.s.sol` can
+        // replay the recorded fixture lifecycle, whose Merkle tree contains legacy leaves.
+        // Anything deposited into it is unrecoverable: the public `redeem()` was removed for
+        // leaking a recipient and an amount, and `redeemPrivate` cannot serve this market
+        // because it reads settled totals from `EncryptedParimutuelPool`, which a plaintext
+        // market has none of.
+        pool.registerMarket(MARKET_ID, Vault(d.vault));
+
+        // ...and then the door is shut, irreversibly, in the same transaction that opened it.
+        // This is the enforced half of the deprecation: the two markets above are the last
+        // plaintext and encrypted markets this deployment will ever have from `registerMarket`,
+        // so no future operator can strand funds in a third. `registerEncryptedMarket` is
+        // deliberately NOT affected -- see `freezeLegacyMarkets`.
+        pool.freezeLegacyMarkets();
 
         // Settlement reads from here, and only from here. Deployed after the pool because
         // it takes the pool's real address rather than a predicted one.
+        (uint256 keyX, uint256 keyY) = _committeeKey();
         d.encryptedParimutuel = address(
-            new EncryptedParimutuelPool(
-                ElGamalAccumulator(d.accumulator), pool, COMMITTEE_KEY_X, COMMITTEE_KEY_Y, MIN_PUBLISH_INTERVAL
-            )
+            new EncryptedParimutuelPool(ElGamalAccumulator(d.accumulator), pool, keyX, keyY, MIN_PUBLISH_INTERVAL)
+        );
+
+        // THE EXIT PATH. Without this the pool accepts deposits and bets and can never pay
+        // anything out: `redeemPrivate` and `withdraw` both revert on a zero verifier, and
+        // the public `redeem()` was removed. A deployment missing this call is a one-way
+        // vault, and the first testnet deploy shipped exactly that -- all three of these
+        // slots were address(0) on chain.
+        //
+        // It is a separate call rather than a constructor argument because the dependency is
+        // circular: `EncryptedParimutuelPool` takes the pool's real address, so it cannot
+        // exist before the pool does. `bindEncryptedTotals` is one-shot and irreversible.
+        pool.bindEncryptedTotals(
+            IEncryptedTotals(d.encryptedParimutuel),
+            IActionVerifier(d.redeemPrivateVerifier),
+            IActionVerifier(d.withdrawVerifier)
+        );
+    }
+
+    /// @dev Every invariant a correct deployment must satisfy, checked against the chain
+    ///      that was just written to. Shares one list with `VerifyDeployment.s.sol` and
+    ///      `DeployConfig.t.sol`, so the three cannot drift apart.
+    function _verify(Deployed memory d) internal view {
+        (uint256 keyX, uint256 keyY) = _committeeKey();
+
+        DeploymentInvariants.check(
+            DeploymentInvariants.Expected({
+                pool: d.pool,
+                tree: d.tree,
+                accumulator: d.accumulator,
+                encryptedParimutuel: d.encryptedParimutuel,
+                parimutuel: d.parimutuel,
+                nullifiers: d.nullifiers,
+                sequencer: d.pool,
+                encryptedMarketId: ENCRYPTED_MARKET_ID,
+                oracleMarketId: ORACLE_MARKET_ID,
+                committeeKeyX: keyX,
+                committeeKeyY: keyY,
+                // A fresh deployment must be at genesis. Anything else means the tree was
+                // touched between construction and here, which should be impossible.
+                expectedRoot: IncrementalMerkleTree(d.tree).root()
+            })
         );
     }
 
@@ -175,8 +352,11 @@ contract Deploy is Script {
         console.log("Vault (encrypted)    :", d.encryptedVault);
         console.log("DepositVerifier      :", d.depositVerifier);
         console.log("BetVerifier          :", d.betVerifier);
-        console.log("RedeemVerifier       :", d.redeemVerifier);
         console.log("BetEncryptedVerifier :", d.betEncryptedVerifier);
+        console.log("RedeemPrivateVerifier:", d.redeemPrivateVerifier);
+        console.log("WithdrawVerifier     :", d.withdrawVerifier);
+        console.log("PythResolver         :", d.pythResolver);
+        console.log("Vault (oracle, mkt 10):", d.oracleVault);
         console.log("IncrementalMerkleTree:", d.tree);
         console.log("ParimutuelPool       :", d.parimutuel);
         console.log("ElGamalAccumulator   :", d.accumulator);

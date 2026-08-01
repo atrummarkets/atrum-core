@@ -274,13 +274,26 @@ contract IncrementalMerkleTreeTest is Test {
 
         assertLt(used, MAX_INSERT_SINGLE_GAS, "single insert() regressed");
 
-        // The load-bearing claim: this path plus a verify does NOT fit, which is why
-        // the sequencer must batch. If this ever starts fitting, the batching
-        // requirement needs re-deriving rather than quietly becoming optional.
+        // The load-bearing claim: this path plus a verify does NOT fit, which is why the
+        // sequencer must batch. If it ever starts fitting, the batching requirement needs
+        // re-deriving rather than quietly becoming optional.
+        //
+        // Compared as a PROJECTED testnet figure, not the raw local one. Local `forge`
+        // undercharges by 32-55% on every measured action, so comparing a local number
+        // straight to the envelope is the exact mistake `ActionGasPolicy` warns against --
+        // and it is what this assertion used to do. Raising the envelope to 2,500,000
+        // made the local figure "fit" and failed this test, which is the test working:
+        // the premise deserved re-checking, and on real gas it still holds.
+        //
+        // Projected at the LOWEST measured ratio, because this proves something does NOT
+        // fit -- the conservative direction is the one that makes fitting easiest.
+        uint256 projected = (used + MEASURED_VERIFY_GAS) * ActionGasPolicy.MIN_LOCAL_TO_TESTNET_PCT / 100;
+        console.log("projected testnet   :", projected);
+
         assertGt(
-            used + MEASURED_VERIFY_GAS,
+            projected,
             ActionGasPolicy.UNIFORM_ACTION_GAS_LIMIT,
-            "unbatched insert now fits the envelope -- re-derive the batching rule"
+            "unbatched insert now fits the envelope even projected -- re-derive the batching rule"
         );
     }
 

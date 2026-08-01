@@ -59,7 +59,21 @@ function assert(condition, message) {
   if (!condition) throw new Error(`ASSERTION FAILED: ${message}`);
 }
 
+/**
+ * Every witness input the generator built, keyed by circuit.
+ *
+ * Written out because a browser client has to construct exactly these, and a recorded
+ * example is a far better specification than prose. Also feeds the proving-time spike --
+ * benchmarking needs real inputs, and inventing them by hand is how you end up measuring a
+ * witness that would never satisfy the circuit.
+ */
+const witnessInputs = {};
+
 async function prove(circuit, input, { emitCalldata = true } = {}) {
+  // Last one wins where a circuit is proved more than once; they are the same shape, which
+  // is all a client or a benchmark needs.
+  witnessInputs[circuit] = input;
+
   const { proof, publicSignals } = await snarkjs.groth16.fullProve(
     input,
     new URL(`${circuit}_js/${circuit}.wasm`, BUILD).pathname,
@@ -407,7 +421,12 @@ async function main() {
   //
   // A different stake from the first, deliberately: with two equal stakes a broken
   // accumulator that simply doubled one input would produce the same answer.
-  const SECOND_UNITS = 37n;
+  //
+  // Was 37, which is not on the denomination ladder. `ShieldedPool.deposit` now refuses
+  // any amount that is not a power of ten, because a one-of-a-kind deposit amount is a
+  // name tag -- see `Denominations.sol`. 10 keeps the stakes distinct while being a
+  // legal rung.
+  const SECOND_UNITS = 10n;
 
   const encDepositNote2 = {
     nullifier: randomField(),
@@ -513,6 +532,200 @@ async function main() {
   };
 
   // -------------------------------------------------------------------------
+  // 6b. PRIVATE REDEEM: turn a winning position into a SETTLED note, paying nobody.
+  //
+  //     This is the item both build plans refuse to cut. `redeem.circom` publishes a
+  //     recipient address and an amount; `redeem_private.circom` publishes neither and emits
+  //     a note instead, so exiting to USDC becomes a separate, later, unlinkable action.
+  //
+  //     The note redeemed here is the position `betEncrypted` created, so this fixture only
+  //     works against a tree that actually contains it -- batch 5 below grafts both position
+  //     notes, and the contract's root must match `rpRootAfterBatch`.
+  // -------------------------------------------------------------------------
+  // ONLY the second position note. The first was already grafted in batch 4 alongside the
+  // second encrypted deposit -- re-listing it here asks the contract to graft a leaf that is
+  // no longer queued, which is exactly what `NotEnoughQueued` was reporting.
+  const rpBatch = [encPositionCommitment2];
+  while (rpBatch.length < BATCH_SIZE) {
+    rpBatch.push(derivedFiller(4 * BATCH_SIZE, rpBatch.length));
+  }
+  for (const leaf of rpBatch) tree.insert(leaf);
+
+  const rpRootAfterBatch = tree.root();
+  fixtures.batch5 = rpBatch.map((x) => x.toString());
+  fixtures.batch5Real = [encPositionCommitment2.toString()];
+  fixtures.rootAfterBatch5 = rpRootAfterBatch.toString();
+
+  // The position note being redeemed is the FIRST leaf of batch 4 (index 3 * BATCH_SIZE),
+  // not batch 5 -- `betEncrypted` queued it before the second encrypted deposit, so batch 4
+  // grafted both together. Its Merkle path is taken after batch 5 so the proof is built
+  // against `rpRootAfterBatch`, a root the contract will actually hold.
+  const rpPositionPath = tree.path(3 * BATCH_SIZE);
+
+  // Settled totals: both bets went on YES, nothing on NO. So YES wins and takes the whole
+  // pool, and the payout for a position of UNITS is `UNITS * total / winning`.
+  const rpSettledYes = UNITS + SECOND_UNITS;
+  const rpSettledNo = 0n;
+  const rpTotalPool = rpSettledYes + rpSettledNo;
+  const rpWinningPool = rpSettledYes;
+
+  const rpDividend = UNITS * rpTotalPool;
+  const rpPayout = rpDividend / rpWinningPool;
+  const rpRemainder = rpDividend % rpWinningPool;
+
+  assert(
+    rpPayout * rpWinningPool + rpRemainder === rpDividend,
+    "redeem division does not reconstruct its rpDividend",
+  );
+  assert(rpRemainder < rpWinningPool, "redeem remainder is not less than the divisor");
+
+  const RP_SETTLED = 3n;
+
+  const rpSettledNote = {
+    nullifier: randomField(),
+    secret: randomField(),
+    marketId: ENCRYPTED_MARKET_ID,
+    outcome: RP_SETTLED,
+    units: rpPayout,
+  };
+  const rpSettledCommitment = noteCommitment(rpSettledNote);
+  const rpNullifierHash = nullifierHash(encPositionNote.nullifier);
+
+  // rpRedeemMeta = marketId * 2^130 + outcome * 2^128 + rpTotalPool * 2^64 + rpWinningPool
+  const rpRedeemMeta =
+    ENCRYPTED_MARKET_ID * (1n << 130n) +
+    OUTCOME_YES * (1n << 128n) +
+    rpTotalPool * (1n << 64n) +
+    rpWinningPool;
+
+  const rpProof = await prove("redeem_private", {
+    root: rpRootAfterBatch,
+    nullifierHash: rpNullifierHash,
+    newCommitment: rpSettledCommitment,
+    // Explicit keys, not shorthand: these must be the CIRCUIT's signal names, which are
+    // independent of whatever the JS variables are called.
+    redeemMeta: rpRedeemMeta,
+    nullifier: encPositionNote.nullifier,
+    secret: encPositionNote.secret,
+    newNullifier: rpSettledNote.nullifier,
+    newSecret: rpSettledNote.secret,
+    marketId: ENCRYPTED_MARKET_ID,
+    outcome: OUTCOME_YES,
+    units: UNITS,
+    totalPool: rpTotalPool,
+    winningPool: rpWinningPool,
+    payout: rpPayout,
+    remainder: rpRemainder,
+    pathElements: rpPositionPath.pathElements,
+    pathIndices: rpPositionPath.pathIndices,
+  });
+
+  fixtures.redeemPrivate = {
+    ...rpProof,
+    root: rpRootAfterBatch.toString(),
+    nullifierHash: rpNullifierHash.toString(),
+    newCommitment: rpSettledCommitment.toString(),
+    redeemMeta: rpRedeemMeta.toString(),
+    // Everything below is for the test's assertions, NOT sent on-chain -- units and the
+    // payout are private, which is the whole point of this circuit.
+    privateUnits: UNITS.toString(),
+    privatePayout: rpPayout.toString(),
+    settledYesTotal: rpSettledYes.toString(),
+    settledNoTotal: rpSettledNo.toString(),
+    settledOutcome: RP_SETTLED.toString(),
+  };
+
+  // -------------------------------------------------------------------------
+  // 6c. WITHDRAW: the SETTLED note leaves for public USDC, keeping change.
+  //
+  //     Spends the note `redeemPrivate` just produced, so this only works against a tree
+  //     that contains it -- batch 6 grafts it, and the contract's root must match
+  //     `rootAfterBatch6`.
+  //
+  //     The withdrawal is PARTIAL on purpose. A settled payout is whatever the parimutuel
+  //     arithmetic produced, and that exact number identifies the position that earned it;
+  //     withdrawing a round amount instead is what keeps the exit unlinkable. The remainder
+  //     comes back as a change note that is still SETTLED, so it stays withdrawable and
+  //     stays un-redeemable.
+  //
+  //     Variable names carry a `wd` prefix: an earlier addition to this file reused names
+  //     already bound above and failed to parse, and a blanket rename then silently mangled
+  //     the witness input keys, which must be the CIRCUIT's signal names.
+  // -------------------------------------------------------------------------
+  const wdBatch = [rpSettledCommitment];
+  while (wdBatch.length < BATCH_SIZE) {
+    wdBatch.push(derivedFiller(5 * BATCH_SIZE, wdBatch.length));
+  }
+  for (const leaf of wdBatch) tree.insert(leaf);
+
+  const wdRootAfterBatch = tree.root();
+  fixtures.batch6 = wdBatch.map((x) => x.toString());
+  fixtures.batch6Real = [rpSettledCommitment.toString()];
+  fixtures.rootAfterBatch6 = wdRootAfterBatch.toString();
+
+  // The settled note is the first leaf of batch 6.
+  const wdPath = tree.path(5 * BATCH_SIZE);
+
+  // Take a ladder amount out of the payout and leave the rest as private change.
+  //
+  // Was 60, which is not a rung. The withdrawn amount is PUBLIC, so it must look like
+  // every other withdrawal or it identifies the position that earned it -- which is the
+  // whole reason partial withdrawal exists. The CHANGE is unconstrained: it stays a
+  // private note, and a parimutuel payout cannot be forced onto a ladder anyway.
+  const wdAmount = 10n;
+  const wdChange = rpPayout - wdAmount;
+  assert(wdAmount + wdChange === rpPayout, "withdraw does not conserve the note value");
+  assert(wdAmount > 0n, "withdraw amount must be non-zero");
+
+  // Anvil account 0, matching the recipient the Solidity suite checks.
+  const wdRecipient = 0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266n;
+
+  const wdChangeNote = {
+    nullifier: randomField(),
+    secret: randomField(),
+    marketId: ENCRYPTED_MARKET_ID,
+    outcome: RP_SETTLED,
+    units: wdChange,
+  };
+  const wdChangeCommitment = noteCommitment(wdChangeNote);
+  const wdNullifierHash = nullifierHash(rpSettledNote.nullifier);
+
+  // withdrawData = marketId * 2^200 + recipient * 2^40 + amount
+  const wdWithdrawData =
+    ENCRYPTED_MARKET_ID * (1n << 200n) + wdRecipient * (1n << 40n) + wdAmount;
+
+  const wdProof = await prove("withdraw", {
+    root: wdRootAfterBatch,
+    nullifierHash: wdNullifierHash,
+    changeCommitment: wdChangeCommitment,
+    withdrawData: wdWithdrawData,
+    nullifier: rpSettledNote.nullifier,
+    secret: rpSettledNote.secret,
+    newNullifier: wdChangeNote.nullifier,
+    newSecret: wdChangeNote.secret,
+    marketId: ENCRYPTED_MARKET_ID,
+    units: rpPayout,
+    recipient: wdRecipient,
+    amount: wdAmount,
+    change: wdChange,
+    pathElements: wdPath.pathElements,
+    pathIndices: wdPath.pathIndices,
+  });
+
+  fixtures.withdraw = {
+    ...wdProof,
+    root: wdRootAfterBatch.toString(),
+    nullifierHash: wdNullifierHash.toString(),
+    changeCommitment: wdChangeCommitment.toString(),
+    withdrawData: wdWithdrawData.toString(),
+    // For assertions only -- the note value and the change are PRIVATE and never sent.
+    amount: wdAmount.toString(),
+    recipient: "0x" + wdRecipient.toString(16),
+    privateNoteValue: rpPayout.toString(),
+    privateChange: wdChange.toString(),
+  };
+
+  // -------------------------------------------------------------------------
   // 7. Negative fixture: a bet proof for a note that was never deposited.
   //    The contract must reject it, and the only thing standing in the way is the
   //    Merkle constraint -- worth having a real counterexample rather than trusting it.
@@ -568,6 +781,13 @@ async function main() {
   };
 
   writeFileSync(OUT.pathname, JSON.stringify(fixtures, null, 2));
+
+  // BigInts are not JSON-serialisable; the circuits take decimal strings anyway, which is
+  // also the shape a browser client will hand snarkjs.
+  writeFileSync(
+    new URL("../build/witness-inputs.json", import.meta.url).pathname,
+    JSON.stringify(witnessInputs, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2),
+  );
 
   console.log("wrote", OUT.pathname);
   console.log("  deposit commitment :", depositCommitment);

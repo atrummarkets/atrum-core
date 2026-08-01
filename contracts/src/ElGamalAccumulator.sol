@@ -88,6 +88,22 @@ contract ElGamalAccumulator {
     mapping(uint32 => mapping(uint8 => bool)) public initialised;
 
     event StakeAccumulated(uint32 indexed marketId, uint8 outcome);
+
+    /// @notice Encrypted bets accumulated for a market, both sides combined.
+    ///
+    /// @dev Stored rather than counted from `StakeAccumulated` logs, because NEITHER RPC on
+    ///      Monad will serve the scan. Measured: the public endpoint caps `eth_getLogs` at a
+    ///      100-block range, and Alchemy's free tier at NINE. A market a week old spans over
+    ///      a million blocks, so counting from logs would need six figures of requests.
+    ///
+    ///      The publisher needs this to pace itself. Its cadence policy gates on how many
+    ///      bets have landed since the last publication -- that is what keeps a sequence of
+    ///      ratios from being solvable for individual stakes -- so an uncountable bet count
+    ///      means a publisher that cannot safely publish at all.
+    ///
+    ///      It reveals nothing new. Every encrypted bet is already a visible transaction and
+    ///      already emits an event; this only makes the count readable without a log scan.
+    mapping(uint32 => uint256) public betCount;
     event MarketInitialised(uint32 indexed marketId, uint8 outcome);
 
     error NotPool();
@@ -160,6 +176,13 @@ contract ElGamalAccumulator {
         if (!BabyJubJub.isOnCurve(c1x, c1y) || !BabyJubJub.isOnCurve(c2x, c2y)) {
             revert NotOnCurve();
         }
+
+        // Incremented HERE, before the point arithmetic allocates its locals -- doing it
+        // beside the event at the end pushes this function over the stack limit. A revert
+        // later in the call rolls this back with everything else, so the early write is not
+        // an over-count.
+        betCount[marketId] += 1;
+
         _rejectDegenerateC1(c1x, c1y);
 
         CiphertextExt storage acc = _extended[marketId][outcome];
@@ -190,6 +213,12 @@ contract ElGamalAccumulator {
         if (!BabyJubJub.isOnCurve(c1x, c1y) || !BabyJubJub.isOnCurve(c2x, c2y)) {
             revert NotOnCurve();
         }
+
+        // Incremented HERE, before the point arithmetic allocates its locals -- doing it
+        // beside the event at the end pushes this function over the stack limit. A revert
+        // later in the call rolls this back with everything else, so the early write is not
+        // an over-count.
+        betCount[marketId] += 1;
         _rejectDegenerateC1(c1x, c1y);
 
         CiphertextAffine storage acc = _affine[marketId][outcome];

@@ -1,0 +1,91 @@
+# Render blueprint for the two off-chain processes.
+#
+# THEY ARE SEPARATE SERVICES ON PURPOSE, and it is not about scaling.
+#
+#   - The SEQUENCER is trusted for liveness and ordering only. If it is compromised it can
+#     stall the market. It cannot steal (flushBatch checks submitted leaves against the
+#     on-chain queue), cannot forge a leaf, and cannot learn who bet what.
+#   - The PUBLISHER holds the COMMITTEE SECRET. If it is compromised the attacker decrypts
+#     every individual bet in every market, retroactively. That is the entire privacy claim
+#     of the product, in one environment variable.
+#
+# Separate services means separate environment groups, so the committee key never enters the
+# sequencer's environment at all. That is free and it is the one isolation worth keeping.
+#
+# WHAT THIS DOES NOT FIX: a single committee key is single-operator trust regardless of where
+# it runs. Hosting is not the answer to that; the 3-of-5 threshold committee is.
+
+services:
+  # ---------------------------------------------------------------------------
+  # Sequencer -- MUST NOT SLEEP.
+  #
+  # It serves Merkle paths. While it is down nobody can build a bet proof, so a sleeping
+  # sequencer is a closed market, not a slow one. Hence a worker rather than a free web
+  # service -- though it also exposes HTTP, so a free instance plus an uptime pinger on
+  # /health is a workable trade if $7 is the binding constraint.
+  # ---------------------------------------------------------------------------
+  - type: worker
+    name: atrum-sequencer
+    runtime: node
+    plan: starter
+    rootDir: sequencer
+    buildCommand: npm ci
+    startCommand: npm run start:sequencer
+    healthCheckPath: /health
+    envVars:
+      - key: NETWORK
+        value: testnet
+      - key: POOL_ADDRESS
+        sync: false
+      # Without this the first resync starts at genesis. Monad's public RPC caps
+      # eth_getLogs at a 100-block range, so that is thousands of requests.
+      - key: DEPLOY_BLOCK
+        sync: false
+      # Pays gas only. Never the committee key.
+      - key: RELAYER_MNEMONIC
+        sync: false
+      # The public endpoint rate-limits hard. Point this at a private one before real use.
+      - key: RPC_URL
+        sync: false
+
+  # ---------------------------------------------------------------------------
+  # Publisher -- may sleep, and it is survivable.
+  #
+  # A sleeping publisher means stale odds, which is cosmetic: the attested ratio is
+  # UNVERIFIED by construction and no payout reads it. Settlement goes through
+  # publishFinalTotals, which carries a Chaum-Pedersen proof.
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: atrum-publisher
+    runtime: node
+    plan: free
+    rootDir: sequencer
+    buildCommand: npm ci
+    startCommand: npm run start:publisher
+    healthCheckPath: /health
+    envVars:
+      - key: NETWORK
+        value: testnet
+      - key: POOL_ADDRESS
+        sync: false
+      - key: ACCUMULATOR_ADDRESS
+        sync: false
+      - key: ENCRYPTED_POOL_ADDRESS
+        sync: false
+      - key: MARKET_IDS
+        sync: false
+      - key: DEPLOY_BLOCK
+        sync: false
+      # THE CROWN JEWELS. Set this by hand in the Render dashboard, in this service's own
+      # environment group, and nowhere else. It must never appear in the sequencer's
+      # environment, in a committed file, or in a log.
+      - key: COMMITTEE_SECRET
+        sync: false
+      # Signs publishAttestedRatio. Pays gas, decrypts nothing -- deliberately a different
+      # key from COMMITTEE_SECRET so a leaked hot wallet is not a privacy incident.
+      - key: PUBLISHER_PRIVATE_KEY
+        sync: false
+      - key: RPC_URL
+        sync: false
+      - key: TICK_INTERVAL_MS
+        value: "60000"

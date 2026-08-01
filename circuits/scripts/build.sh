@@ -59,6 +59,21 @@ node scripts/gen_committee_key_circom.mjs
 
 # circuit:ptau-power. Phase 0 probes stay on 13 so their measured gas is not perturbed
 # by an unrelated change; the Phase 1 action circuits take the smallest power they fit.
+# ZKEYS ARE NOT REPRODUCIBLE, AND THAT IS CORRECT. MEASURED:
+#
+#   `snarkjs groth16 setup`  -- deterministic (identical bytes across runs)
+#   `snarkjs zkey contribute` -- NOT deterministic, even with a fixed `-e` entropy string;
+#                                it mixes its own randomness in regardless.
+#
+# We tried pinning `-e` to make the final zkey reproducible so the verification keys could
+# be committed. It does not work, and it SHOULD not: if the whole setup were derivable from
+# public inputs, the toxic waste would be public and every proof forgeable. The
+# non-determinism in `contribute` is the security property.
+#
+# The consequence is that `<circuit>_vkey.json` CANNOT be committed -- see `.gitignore`.
+# Committing them is what caused a third of the suite to fail with InvalidProof() on a
+# clean pull: committed vkeys from one machine against locally-built zkeys from another.
+#
 CIRCUITS=(
     probe_pubkey_input:13
     probe_fixed_key:13
@@ -66,6 +81,10 @@ CIRCUITS=(
     bet:14
     redeem:14
     bet_encrypted:15
+    # 14,405 total constraints, past power 13's 8,192 ceiling.
+    redeem_private:14
+    # 14,438 total constraints, past power 13's 8,192 ceiling.
+    withdraw:14
 )
 
 for entry in "${CIRCUITS[@]}"; do
@@ -88,7 +107,7 @@ for entry in "${CIRCUITS[@]}"; do
     # Phase-2 contribution. One contribution is enough to make the zkey usable;
     # a real deployment needs a multi-party ceremony, since anyone who knows every
     # contribution can forge proofs.
-    echo "==> phase-2 contribution (single -- NOT a production ceremony)"
+    echo "==> phase-2 contribution (single, random entropy -- NOT a production ceremony)"
     npx snarkjs zkey contribute \
         "$BUILD/${c}_0000.zkey" "$BUILD/$c.zkey" \
         --name="atrum-measurement-$c" -v -e="$(head -c 64 /dev/urandom | base64)"

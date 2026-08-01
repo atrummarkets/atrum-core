@@ -9,23 +9,9 @@
  * Run: node --experimental-strip-types src/main.ts
  */
 import { createServer } from "node:http";
-import { defineChain } from "viem";
 import { Sequencer } from "./sequencer.ts";
+import { chainFor } from "./chains.ts";
 import type { Address } from "viem";
-
-export const monadTestnet = defineChain({
-  id: 10143,
-  name: "Monad Testnet",
-  nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
-  rpcUrls: { default: { http: ["https://testnet-rpc.monad.xyz"] } },
-});
-
-export const monadMainnet = defineChain({
-  id: 143,
-  name: "Monad",
-  nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
-  rpcUrls: { default: { http: ["https://rpc.monad.xyz"] } },
-});
 
 function required(name: string): string {
   const value = process.env[name];
@@ -34,7 +20,7 @@ function required(name: string): string {
 }
 
 async function main(): Promise<void> {
-  const chain = process.env.NETWORK === "mainnet" ? monadMainnet : monadTestnet;
+  const chain = chainFor(process.env.NETWORK);
 
   const sequencer = new Sequencer({
     rpcUrl: process.env.RPC_URL ?? chain.rpcUrls.default.http[0]!,
@@ -51,8 +37,25 @@ async function main(): Promise<void> {
   createServer((req, res) => {
     const url = new URL(req.url ?? "/", `http://localhost:${port}`);
 
+    // Liveness. Exists because every other route answers 404 or 400 by design, so an
+    // uptime monitor pointed at this service would report it permanently DOWN -- and on a
+    // host that sleeps idle services, the monitor is what keeps it awake.
+    //
+    // Returns only values that are already public on-chain. A health endpoint is the
+    // easiest place to leak state by accident.
+    if (url.pathname === "/health") {
+      res.writeHead(200, { "content-type": "application/json" }).end(
+        JSON.stringify({
+          status: "ok",
+          leaves: sequencer.tree.size,
+          root: sequencer.tree.root().toString(),
+        }),
+      );
+      return;
+    }
+
     if (url.pathname !== "/path") {
-      res.writeHead(404).end('{"error":"only /path?commitment=0x... is served"}');
+      res.writeHead(404).end('{"error":"only /health and /path?commitment=0x... are served"}');
       return;
     }
 
