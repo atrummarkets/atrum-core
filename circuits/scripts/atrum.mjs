@@ -11,7 +11,10 @@
  * asserts they match what the circuit produced and what the contract stores, rather
  * than assuming three independent implementations happen to agree.
  *
- * Shared by `gen_action_fixtures.mjs` and the sequencer's tree mirror.
+ * Shared by `gen_action_fixtures.mjs`, the sequencer's tree mirror, AND the browser client,
+ * which bundles this file rather than reimplementing it. A fourth implementation living in
+ * the frontend is exactly how the three above would drift apart, so keep this module
+ * runtime-neutral: no `Buffer`, no `node:*` imports, nothing that only exists under Node.
  */
 import { buildPoseidon } from "circomlibjs";
 import sha3 from "js-sha3";
@@ -38,9 +41,14 @@ export function derivedFiller(treeStart, slot) {
   return BigInt("0x" + keccak256(bytes)) % FIELD_SIZE;
 }
 
-/** keccak256("atrum.shielded.padding.v1"), the contract's PAD_DOMAIN. */
+/**
+ * keccak256("atrum.shielded.padding.v1"), the contract's PAD_DOMAIN.
+ *
+ * `TextEncoder` rather than `Buffer` because this module is also bundled for the browser
+ * client -- see the header note on staying runtime-neutral. It is UTF-8 either way.
+ */
 export const PAD_DOMAIN_HEX = keccak256(
-  Uint8Array.from(Buffer.from("atrum.shielded.padding.v1", "utf8")),
+  new TextEncoder().encode("atrum.shielded.padding.v1"),
 );
 
 export const FIELD_SIZE =
@@ -48,6 +56,7 @@ export const FIELD_SIZE =
 
 export const DEPTH = 20;
 export const UNIT_BITS = 64n;
+export const AMOUNT_BITS = 40n;
 export const NULLIFIER_DOMAIN = 1n;
 
 export const OUTCOME_UNBET = 0n;
@@ -102,9 +111,69 @@ export function packPayoutData(recipient, units) {
   return BigInt(recipient) * (1n << UNIT_BITS) + units;
 }
 
-/** marketMeta = marketId * 4 + outcome */
+/** marketMeta = marketId * 4 + outcome. `bet_encrypted`'s `betMeta`. */
 export function packMarketMeta(marketId, outcome) {
   return marketId * 4n + outcome;
+}
+
+/**
+ * redeemMeta = marketId*2^130 + outcome*2^128 + totalPool*2^64 + winningPool
+ *
+ * Matches `redeem_private.circom:137` and `ShieldedPool._unpackRedeemMeta`. The pools are
+ * public because the contract pins them to the settled totals -- without that pin the
+ * circuit would faithfully prove the payout arithmetic about invented divisors.
+ */
+export function packRedeemMeta(marketId, outcome, totalPool, winningPool) {
+  if (totalPool >= 1n << 64n) throw new Error("totalPool out of range");
+  if (winningPool >= 1n << 64n) throw new Error("winningPool out of range");
+  return (
+    marketId * (1n << 130n) +
+    outcome * (1n << 128n) +
+    totalPool * (1n << 64n) +
+    winningPool
+  );
+}
+
+/**
+ * withdrawData = marketId*2^200 + recipient*2^40 + amount
+ *
+ * Matches `withdraw.circom:155` and `ShieldedPool._unpackWithdrawData`. `amount` is 40 bits,
+ * not 64 -- the wider unit field does not fit alongside a 160-bit address.
+ */
+export function packWithdrawData(marketId, recipient, amount) {
+  if (amount >= 1n << AMOUNT_BITS) throw new Error("amount out of range");
+  return marketId * (1n << 200n) + BigInt(recipient) * (1n << AMOUNT_BITS) + amount;
+}
+
+/**
+ * The denomination ladder, mirroring `contracts/src/Denominations.sol`.
+ *
+ * Powers of ten only -- NOT 1-2-5. Privacy rests on withdrawals looking identical, so the
+ * set is deliberately coarse. Enforced on-chain for `deposit` units and the `withdraw`
+ * amount, and deliberately NOT for change notes or redeem payouts, which are whatever the
+ * parimutuel arithmetic produced.
+ *
+ * Exported here so the client can reject an invalid amount BEFORE the user pays to build a
+ * proof for a transaction that would revert.
+ */
+export const MAX_DENOMINATION_EXPONENT = 9;
+
+export const DENOMINATIONS = Array.from(
+  { length: MAX_DENOMINATION_EXPONENT + 1 },
+  (_, i) => 10n ** BigInt(i),
+);
+
+export function isValidDenomination(units) {
+  return DENOMINATIONS.includes(BigInt(units));
+}
+
+/** The largest valid denomination at or below `units`, or null if there is none. */
+export function snapToDenomination(units) {
+  const v = BigInt(units);
+  if (v <= 0n) return null;
+  let best = null;
+  for (const d of DENOMINATIONS) if (d <= v) best = d;
+  return best;
 }
 
 /**
