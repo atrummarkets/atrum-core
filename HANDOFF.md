@@ -99,6 +99,13 @@ today's single-contribution keys are fine for that.
   scanning; read state.
 - **Denominations are enforced on-chain** — powers of ten only. A deposit of 137 reverts.
 - **After any deploy:** `make verify-deployment POOL=0x…` and `make verify-mirror POOL=0x…`.
+- **The default public RPC lies about balances on writes.** `testnet-rpc.monad.xyz` rejected
+  every `flushBatch` with `Signer had insufficient balance` while the signer held 8.368 MON
+  against a 0.488 MON requirement. Balance, authorization, call validity (`eth_call`
+  simulation of the identical call SUCCEEDED), stale client state and mempool backlog were
+  each ruled out; the same transaction succeeded immediately through
+  `rpc.ankr.com/monad_testnet`. Set `RPC_URL` for anything that submits. See
+  `sequencer/src/chains.ts` for the full elimination. It also 429s under modest read load.
 
 ### Still open, deliberately not started
 
