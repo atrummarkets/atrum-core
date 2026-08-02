@@ -11,6 +11,7 @@
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Sequencer } from "./sequencer.ts";
+import { initHasher } from "./tree.ts";
 import { chainFor } from "./chains.ts";
 import type { Address } from "viem";
 
@@ -112,6 +113,14 @@ function required(name: string): string {
 
 async function main(): Promise<void> {
   const chain = chainFor(process.env.NETWORK);
+
+  // MUST run before `new Sequencer(...)`: `Sequencer.tree` is a field initializer
+  // (`readonly tree = new CommitmentTree()`), which runs synchronously during construction
+  // and calls hash2 immediately to compute the empty-tree roots. `sequencer.init()` also
+  // calls this, but by then the constructor has already thrown. verify-mirror.ts and every
+  // test get this ordering right; this entrypoint -- the actual service -- did not, and
+  // nothing caught it because nothing had run main() as a cold process before.
+  await initHasher();
 
   const sequencer = new Sequencer({
     rpcUrl: process.env.RPC_URL ?? chain.rpcUrls.default.http[0]!,
