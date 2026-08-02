@@ -150,13 +150,13 @@ testnet-preflight: ## Check the deploy key is set and funded, WITHOUT broadcasti
 
 .PHONY: testnet-deploy
 testnet-deploy: testnet-preflight ## BROADCAST the deployment to Monad testnet (spends real testnet MON)
-	cd contracts && forge script script/Deploy.s.sol \
+	cd contracts && $(FORGE) script script/Deploy.s.sol \
 	  --rpc-url monad_testnet --network monad --broadcast --slow -vv
 
 .PHONY: verify-deployment
 verify-deployment: ## Check a LIVE deployment against every invariant (POOL=0x..)
 	@test -n "$(POOL)" || { echo "usage: make verify-deployment POOL=0x..."; exit 1; }
-	cd contracts && POOL=$(POOL) forge script script/VerifyDeployment.s.sol \
+	cd contracts && POOL=$(POOL) $(FORGE) script script/VerifyDeployment.s.sol \
 	  --rpc-url monad_testnet --network monad
 
 .PHONY: verify-mirror

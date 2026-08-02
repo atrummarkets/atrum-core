@@ -9,45 +9,40 @@ Written to be read by someone who has not seen the earlier conversation.
 
 ## NEXT UP — start here
 
-The protocol is done and proven on chain. Two tracks are open, they are independent, and
-one of them has an irreducible wait, so start it first even though it is the smaller job.
+The protocol is done and proven on chain. The client exists and a real deposit has landed
+with it. Two things are open.
 
-### 1. Build the client. The measurement is done and the architecture is decided.
+### 1. Finish the client: betting, redeeming, withdrawing
 
-The browser number is **measured** (§0-bis): ~2-2.5x Node for the real circuits, and — the
-part that actually decided things — `bet_encrypted` freezes the main thread for **388ms**.
-**Proving runs in a Web Worker.** IndexedDB caching was never gated on it; 29.7MB is too much
-to re-download per session regardless.
+Deposit is done, wallet-connected, and **proven on chain**
+(`0xc81678677ffbbd3a385bc514f075ae03252b60f8d58ef8af76ae856c7359060b`, block 50188842,
+`atrum-client/src/wallet.mjs`). Browser proving is measured, verified against a fresh note
+the repo never saw (`npm run fresh-note`), and the Web Worker decision is made on evidence —
+`bet_encrypted` froze the main thread for 388ms inline, 27ms in the worker
+(`npm run worker-check`). None of that needs re-doing.
 
-To reproduce the measurement at any point:
+What is not built: `betEncrypted`, `redeemPrivate`, `withdraw` on the client side. The
+pattern is `wallet.mjs`'s `submitDeposit` — read the vault from chain, check the proof's
+public signals against the note before broadcasting, fixed 2,500,000 gas limit, never let
+the wallet estimate per action (the declared limit is public, so estimating leaks which
+action you took). `betEncrypted` additionally needs a Merkle path from the sequencer's
+`GET /path?commitment=0x…`, which needs the CORS fix below.
 
-```bash
-cd ../atrum-core && make bench     # Node baseline on THIS machine — do not skip, see §0-bis
-cd ../atrum-client && npm run sync # artefacts + core's primitives bundled for the browser
-npm run browser-baseline           # headless Chromium, full table
-npm run harness                    # or drive it by hand at :8080/harness.html
-```
-
-What remains for the client: lazy-load per action (deposit + `bet_encrypted` = 14.2MB to place
-a first bet), witness building from **real notes** rather than the canned fixtures, Merkle
-paths from the sequencer's `GET /path?commitment=0x…`, and amount snapping to the denomination
-ladder.
-
-**Do not reimplement the protocol in the frontend.** `circuits/scripts/atrum.mjs` is already
-the third implementation of Atrum's hashing rules, alongside `note.circom` and
-`IncrementalMerkleTree.sol`, and all three must agree bit for bit. `atrum-client` bundles that
-module rather than porting it, and every sync re-derives values the circuits already accepted
-and **refuses the bundle if any differ**. Keep that module runtime-neutral — no `Buffer`, no
-`node:*` imports.
-
-**One blocker before the client can talk to the sequencer:** `sequencer/src/main.ts` sets no
-CORS headers, so a browser on another origin cannot read `/path`. Four `writeHead` calls. The
-harness does not need this — it runs entirely off local fixtures.
+**One blocker:** `sequencer/src/main.ts` sets no CORS headers — actually, this is now fixed
+(`createPathHandler`, CORS_ORIGIN env var, 11 tests). What is NOT yet true: nobody has run
+the sequencer against `0x5Ede6585…` (see below) to confirm it mirrors correctly.
 
 ⚠️ **The landmine when you build calldata:** snarkjs swaps each G2 coordinate pair in
 `exportSolidityCallData` versus the raw proof object (`gen_action_fixtures.mjs:88-94`). Use
-`exportSolidityCallData`. Building calldata from the raw proof gives you a well-formed proof
-that reverts.
+`exportSolidityCallData` — building calldata from the raw proof gives you a well-formed proof
+that reverts. `wallet.mjs` and the worker both already do this correctly; keep doing it that
+way for the other three actions.
+
+**Do not reimplement the protocol in the frontend.** `circuits/scripts/atrum.mjs` is the
+third implementation of Atrum's hashing rules, alongside `note.circom` and
+`IncrementalMerkleTree.sol`, and all three must agree bit for bit. `atrum-client` bundles
+that module rather than porting it, and every sync re-derives values the circuits already
+accepted and refuses the bundle if any differ. Keep the module runtime-neutral.
 
 ### 2. Start the ceremony now, because it waits on people
 
@@ -77,9 +72,25 @@ today's single-contribution keys are fine for that.
 
 ### Gotchas that will each cost you a day
 
-- **`make circuits` is never a standalone step.** It regenerates every zkey, which orphans
-  the Groth16 proofs in `action-fixtures.json` and the exported verifiers. Always follow with
-  `make verifiers && make fixtures && make test`.
+- **The live pool is `0x5Ede6585Ed62745E9b1a6b2F0c2Dd2e1ff5798a6`, not `0x6af21cA1…`.**
+  Redeployed 2026-08-02 — see the box at the top of
+  `deployments/monad-testnet-10143/README.md` for why the old one is dead. `atrum-client`'s
+  `SHIELDED_POOL` constant already points at the current one; nothing else in this repo
+  hardcodes an address, so nothing else needed changing.
+- **`make circuits` is never a standalone step, and "standalone" includes redeploying.**
+  It regenerates every zkey — with fresh, non-deterministic entropy on purpose — which
+  orphans BOTH the Groth16 proofs in `action-fixtures.json` AND every already-deployed
+  verifier contract, since the verifying key is baked into the verifier as constants. Always
+  follow a rebuild with `make verifiers && make fixtures && make test`, and if anything is
+  already deployed against the old circuits, redeploy it too. Confirmed the hard way: this
+  session's stale-key fix triggered exactly this and the previous pool went dead until
+  redeployed. Nothing catches it automatically — the contract suite regenerates circuits and
+  contracts together in the same run and never checks a *previously broadcast* verifier.
+- **`testnet-deploy` and `verify-deployment` need the Monad-patched `forge`, not whatever is
+  on `PATH`.** Both Makefile targets called plain `forge script`, which silently used stock
+  Foundry and rejected `--network monad` outright. Fixed — both now go through `$(FORGE)`
+  like every other target. If you see `unexpected argument '--network'`, you have this same
+  bug in an older checkout.
 - **Always `make fixtures`, never a generator directly** — and note you *cannot* revert
   `e2e-`/`settlement-fixtures.json` on their own. They carry DLEQ proofs bound to ciphertexts
   in the gitignored `action-fixtures.json`. §0-bis has the demonstration.
