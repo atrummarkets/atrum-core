@@ -112,6 +112,61 @@ type and one exit.
 
 ---
 
+## 0-ter. The client's other three actions, and two more bugs use found
+
+`atrum-client` now wires `betEncrypted`, `redeemPrivate`, and `withdraw`, not just deposit —
+same note lifecycle discipline throughout (persist the note an action produces before
+broadcasting, mark the note it spent as spent only after confirmation), same
+verify-before-trust standard as `deposit` had. Full account of what changed, and why the pool
+address moves again below, belongs in `atrum-client`'s own commits; this is what surfaced in
+atrum-core while getting there.
+
+### [FIXED] The sequencer never checked whether its own transaction succeeded
+
+`Sequencer.submit()` awaited `waitForTransactionReceipt` and returned — no read of
+`receipt.status`. viem resolves that call once a transaction is **included**, not once it
+**succeeds**; a caller has to check status itself, and this one didn't. Every `flushBatch`
+revert was therefore treated as a successful graft: `tick()` went on to update the in-memory
+mirror as if the leaves it just tried to insert were really on chain.
+
+Found by hitting it: deploying without pointing `SEQUENCER` at an address the running
+sequencer's relayers actually control (see below) made every `flushBatch` revert with
+`NotSequencer()` — silently, per the bug above — and the failure surfaced one tick later as
+`MIRROR DIVERGED`, correctly fatal but for a reason one step removed from the real one.
+Fixed: `submit()` now throws immediately on a reverted receipt, naming the transaction and
+which relayer sent it.
+
+### [GOTCHA] `SEQUENCER` at deploy time must match a relayer the sequencer will actually use
+
+`ShieldedPool.onlySequencer` checks `msg.sender == sequencer` — **one fixed address**, set at
+construction (`Deploy.s.sol`'s `vm.envOr("SEQUENCER", deployer)`, defaulting to the deployer
+if unset). `RelayerPool`'s own docstring describes rotating across ~10 accounts specifically
+*so no single address is a fixed point* — but the contract only ever authorizes one. Deploying
+with the default (`SEQUENCER` unset, so it's the deployer) and then running the sequencer
+service with a *different* `RELAYER_MNEMONIC` means every single flush reverts.
+
+**Not resolved as a design question here** — whether the contract should accept a set of
+sequencer addresses, or whether "rotating relayers" should describe something else (e.g.
+rotating who *signs*, with a single registered forwarding address), is an open architecture
+question, not a bug fix. The immediate fix for testing was mechanical: set `SEQUENCER` at
+deploy time to the first address `RELAYER_MNEMONIC` derives
+(`mnemonicToAccount(mnemonic, { addressIndex: 0 })`), so at least that account's turns
+succeed. A real deployment needs an actual decision here before rotation past index 0 matters.
+
+### [MEASURED] betEncrypted, live, client-built ElGamal ciphertext
+
+Bet placed through the real `atrum-client` UI (headless-driven, real funded wallet, real
+worker, nothing canned): note created and grafted, committee public key read from
+`EncryptedParimutuelPool` on chain, ElGamal-encrypted client-side, proved, submitted.
+**Landed: block 50197594, 1,493,512 gas.** First real evidence the client's encryption path
+— not just its commitment derivation — agrees with what the chain expects.
+
+Resolve, settle, redeem, withdraw are next, gated on the real one-hour
+`resolutionStartTime` gap `Vault.sol` enforces even under `EXERCISE_MODE=1` — not worked
+around, since it is a stated safety invariant, not a knob.
+
+---
+
 ## 0-bis. What changed on 2026-08-02
 
 Two tracks opened in parallel, per §0's "next up": the browser proving harness and the
