@@ -296,6 +296,22 @@ export class Sequencer {
       account,
     });
 
-    await this.publicClient.waitForTransactionReceipt({ hash });
+    // `waitForTransactionReceipt` resolves once the transaction is INCLUDED, not once it
+    // SUCCEEDS -- viem never inspects `status`, by design, because "did it revert" is a
+    // separate question from "did it land." A caller that skips this check treats every
+    // revert as a success.
+    //
+    // That is exactly how this was found: with the deployed `sequencer` address pointed at
+    // a different account than this pool's relayers, every `flushBatch` reverted with
+    // `NotSequencer()`, and this function returned normally anyway -- so `tick()` went on to
+    // update the in-memory mirror as if the leaves it just tried to graft were really on
+    // chain. The result was not an immediate error. It was "MIRROR DIVERGED" one tick later,
+    // once a fresh on-chain root stopped matching -- the right failure, a whole tick late,
+    // for a reason that had nothing to do with a diverged mirror and everything to do with
+    // an unchecked receipt.
+    const receipt = await this.publicClient.waitForTransactionReceipt({ hash });
+    if (receipt.status !== "success") {
+      throw new Error(`${fn} reverted on chain (tx ${hash}, relayer ${account.address})`);
+    }
   }
 }
