@@ -9,115 +9,66 @@ Written to be read by someone who has not seen the earlier conversation.
 
 ## NEXT UP — start here
 
-The protocol is done and proven on chain. The client exists and a real deposit has landed
-with it. Two things are open.
+**The four privacy phases from `DESIGN-PRIVACY.md` are done and verified on chain.** Read
+that document's §4 for what changed and, more importantly, for the two places its own plan
+turned out not to be implementable.
 
-### 1. Finish the client: betting, redeeming, withdrawing
+**Live deployment: pool `0x5EaB8063fB060012c550b29E7321d79b6740773c`** (Monad testnet), with
+`minAnonymitySet = 2` and `minRootAge = 120`. Both are immutable and readable on chain, and
+**2 is a TEST value** — production intent is 8. Anyone can tell which kind of deployment they
+are looking at without trusting what the operator says about it.
 
-Deposit is done, wallet-connected, and **proven on chain**
-(`0xc81678677ffbbd3a385bc514f075ae03252b60f8d58ef8af76ae856c7359060b`, block 50188842,
-`atrum-client/src/wallet.mjs`). Browser proving is measured, verified against a fresh note
-the repo never saw (`npm run fresh-note`), and the Web Worker decision is made on evidence —
-`bet_encrypted` froze the main thread for 388ms inline, 27ms in the worker
-(`npm run worker-check`). None of that needs re-doing.
+### What is verified live, with transaction hashes
 
-What is not built: `betEncrypted`, `redeemPrivate`, `withdraw` on the client side. The
-pattern is `wallet.mjs`'s `submitDeposit` — read the vault from chain, check the proof's
-public signals against the note before broadcasting, fixed 2,500,000 gas limit, never let
-the wallet estimate per action (the declared limit is public, so estimating leaks which
-action you took). `betEncrypted` additionally needs a Merkle path from the sequencer's
-`GET /path?commitment=0x…`, which needs the CORS fix below.
+| what | evidence |
+|---|---|
+| deposit names no market | `0x649fef2290a2cb8c1784633122b31f6d50f84e9ea60565946a295159a1bad10e` |
+| unbet exit (deposit → never bet → withdraw) | `0x9fc76f18…` then `0xe1605caa…` on the prior pool |
+| bet relayed, user address absent | `0xa476ec819cd2e68fcb29da33fe16bd7a0a88287b434a60760f1539716aeb4fca`, `from` = `0x63846933` |
+| root-age gate refuses a fresh root | same bet, first attempt: `RootTooRecent(56, 120)` |
+| anonymity-set counters | `totalDeposits` 2, `depositsAtDenomination(100)` 1, `(10)` 1 |
 
-**One blocker:** `sequencer/src/main.ts` sets no CORS headers — actually, this is now fixed
-(`createPathHandler`, CORS_ORIGIN env var, 11 tests). What is NOT yet true: nobody has run
-the sequencer against `0x5Ede6585…` (see below) to confirm it mirrors correctly.
+`deposit` gas fell **1,816,031 → ~1,160,000** now that it no longer splits into a vault. The
+headroom figure quoted in `ShieldedPool`'s own notice is therefore an over-estimate for
+`deposit` and should be re-measured rather than assumed.
 
-⚠️ **The landmine when you build calldata:** snarkjs swaps each G2 coordinate pair in
-`exportSolidityCallData` versus the raw proof object (`gen_action_fixtures.mjs:88-94`). Use
-`exportSolidityCallData` — building calldata from the raw proof gives you a well-formed proof
-that reverts. `wallet.mjs` and the worker both already do this correctly; keep doing it that
-way for the other three actions.
+### The two plan corrections worth knowing before you touch this
 
-**Do not reimplement the protocol in the frontend.** `circuits/scripts/atrum.mjs` is the
-third implementation of Atrum's hashing rules, alongside `note.circom` and
-`IncrementalMerkleTree.sol`, and all three must agree bit for bit. `atrum-client` bundles
-that module rather than porting it, and every sync re-derives values the circuits already
-accepted and refuses the bundle if any differ. Keep the module runtime-neutral.
+Both are cases where the design document described something that cannot be built, and both
+were only visible once the code was written. Expect more of these.
 
-### 2. Start the ceremony now, because it waits on people
+1. **`Vault.split` could not move to bet time.** `betEncrypted` never receives `units` — the
+   stake is encrypted, which is the entire point — so the contract cannot split a quantity it
+   cannot see. Per-market vaults were dropped from custody entirely; they are now a market
+   clock and an oracle result. This deleted the complete-set invariant, which was the system's
+   strongest safety property, and replaced it with arithmetic in `_recordPayout`.
+   `ShieldedPoolSolvency.t.sol` is the net for that trade.
 
-The script is written and rehearsed (§0-bis). What is left is not code:
+2. **The anonymity gate could not be per-denomination at bet time**, for the same reason. It
+   is gated on the TOTAL deposit count instead — which is also the correct set, since a bet
+   publishes no amount. Per-rung gating applies to `withdraw`, where the amount is public.
 
-- **Who contributes.** Ideally people outside the team — the claim is "not all of them
-  colluded", and that is weaker if they are all you.
-- **How many.** 5–10 is defensible for a testnet MVP.
-- **Which beacon block closes it.** Announce it in `TRANSCRIPT.md` *before* it is mined.
-- **Where contributors post their hashes** at the time, under their own name.
+### What is still open
 
-Then it is one command each, a few minutes apiece, passed hand to hand:
-
-```bash
-make ceremony                                   # usage
-./circuits/scripts/ceremony.sh init <circuit>   # coordinator, once per circuit
-./circuits/scripts/ceremony.sh contribute <circuit> <in> <out> "<name>"
-./circuits/scripts/ceremony.sh finalize <circuit> <last> <beacon-block-hash>
-```
-
-⚠️ **Ordering is the part that costs a day if you get it wrong.** New zkeys mean new
-verification keys mean regenerated Solidity verifiers mean every contract is redeployed.
-**Ceremony first, then deploy once.** Doing it the other way round means deploying twice.
-
-The ceremony does **not** block the frontend. Track 1 measures performance, not security;
-today's single-contribution keys are fine for that.
-
-### Gotchas that will each cost you a day
-
-- **The live pool is `0x5Ede6585Ed62745E9b1a6b2F0c2Dd2e1ff5798a6`, not `0x6af21cA1…`.**
-  Redeployed 2026-08-02 — see the box at the top of
-  `deployments/monad-testnet-10143/README.md` for why the old one is dead. `atrum-client`'s
-  `SHIELDED_POOL` constant already points at the current one; nothing else in this repo
-  hardcodes an address, so nothing else needed changing.
-- **`make circuits` is never a standalone step, and "standalone" includes redeploying.**
-  It regenerates every zkey — with fresh, non-deterministic entropy on purpose — which
-  orphans BOTH the Groth16 proofs in `action-fixtures.json` AND every already-deployed
-  verifier contract, since the verifying key is baked into the verifier as constants. Always
-  follow a rebuild with `make verifiers && make fixtures && make test`, and if anything is
-  already deployed against the old circuits, redeploy it too. Confirmed the hard way: this
-  session's stale-key fix triggered exactly this and the previous pool went dead until
-  redeployed. Nothing catches it automatically — the contract suite regenerates circuits and
-  contracts together in the same run and never checks a *previously broadcast* verifier.
-- **`testnet-deploy` and `verify-deployment` need the Monad-patched `forge`, not whatever is
-  on `PATH`.** Both Makefile targets called plain `forge script`, which silently used stock
-  Foundry and rejected `--network monad` outright. Fixed — both now go through `$(FORGE)`
-  like every other target. If you see `unexpected argument '--network'`, you have this same
-  bug in an older checkout.
-- **Always `make fixtures`, never a generator directly** — and note you *cannot* revert
-  `e2e-`/`settlement-fixtures.json` on their own. They carry DLEQ proofs bound to ciphertexts
-  in the gitignored `action-fixtures.json`. §0-bis has the demonstration.
-- **Local `forge` gas understates real by 32–55%.** Every local figure is a lower bound.
-- **`eth_getLogs` caps at 100 blocks** (public) / 9 (Alchemy free). Never build on log
-  scanning; read state.
-- **Denominations are enforced on-chain** — powers of ten only. A deposit of 137 reverts.
-- **After any deploy:** `make verify-deployment POOL=0x…` and `make verify-mirror POOL=0x…`.
-- **The default public RPC lies about balances on writes.** `testnet-rpc.monad.xyz` rejected
-  every `flushBatch` with `Signer had insufficient balance` while the signer held 8.368 MON
-  against a 0.488 MON requirement. Balance, authorization, call validity (`eth_call`
-  simulation of the identical call SUCCEEDED), stale client state and mempool backlog were
-  each ruled out; the same transaction succeeded immediately through
-  `rpc.ankr.com/monad_testnet`. Set `RPC_URL` for anything that submits. See
-  `sequencer/src/chains.ts` for the full elimination. It also 429s under modest read load.
-
-### Still open, deliberately not started
-
-**Threshold committee (3-of-5).** One key decrypts every bet today. `ChaumPedersen.sol` is
-already built for it and `EncryptedParimutuelPool.sol` notes the swap changes how `D` is
-produced but not a line of the verification.
-
-**Fixture-lifecycle rewrite.** Mechanical, blocks nothing, shrinks audit surface — deletes
-`registerMarket`, `bet()`, `ParimutuelPool` and the plaintext verifiers, leaving one market
-type and one exit.
+- **Relaying is configuration, not code.** It needs `RELAY_MNEMONIC` and funded accounts, and
+  it is OFF unless both are present. When it is off, every user action puts their address on
+  chain — the thing Phase 1 exists to prevent. The startup banner says which mode it is in.
+- **`minRootAge` and the batch cadence are coupled.** The admissible window is
+  `[minRootAge, ROOT_HISTORY_SIZE batches]`. Raise the age above the wall time 64 batches take
+  and the window is EMPTY — every action reverts with `UnknownRoot`, naming the wrong cause.
+  `RootAge.t.sol::test_windowIsNotEmpty` asserts the relationship; keep it honest if the
+  sequencer's `MAX_BATCH_DELAY_MS` changes.
+- **Hidden bet side and multi-note bets** (`DESIGN-PRIVACY.md` §5, §7) are still deferred.
+  `betMeta` publishes which outcome a bet backs.
+- **The ceremony has not been run.** `TRANSCRIPT.md` is empty. The proving keys still come
+  from one machine's entropy, so whoever holds it can forge proofs. Nothing built on this
+  should be described as trustless.
+- **None of this manufactures a crowd.** With three users there are three notes. This work
+  makes the crowd undivided, refuses to let anyone bet into one too small, and says so out
+  loud. Launch strategy remains a security parameter.
 
 ---
+
 
 ## 0-ter. The client's other three actions, and two more bugs use found
 
