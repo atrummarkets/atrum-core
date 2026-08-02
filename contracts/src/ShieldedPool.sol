@@ -254,6 +254,28 @@ contract ShieldedPool {
     ///      that gates nothing.
     uint256 public immutable minAnonymitySet;
 
+    /// @notice How old the root an action proves against must be, in seconds.
+    ///
+    /// @dev The timing defence, and the half of the problem the anonymity-set gate does not
+    ///      touch. A pool of a thousand notes does not help if you deposit, wait for the next
+    ///      batch, and bet: an observer sees a bet land moments after a batch that contained
+    ///      exactly one new commitment, and needs no cryptography at all.
+    ///
+    ///      Requiring an OLDER root means a note cannot be spent out of the batch that
+    ///      created it. It has to wait for the crowd to move on first.
+    ///
+    ///      ⚠️ MUST STAY WELL UNDER `ROOT_HISTORY_SIZE` BATCHES OF WALL TIME. The history is a
+    ///      64-slot ring buffer; a root older than 64 batches has been overwritten and
+    ///      `isKnownRoot` refuses it. So the admissible window is
+    ///      `[minRootAge, 64 batches]`, and if `minRootAge` exceeds the time 64 batches take,
+    ///      that window is EMPTY and every action reverts -- first with `UnknownRoot`, which
+    ///      names the wrong cause. At the sequencer's 20s cadence, 64 batches is ~21 minutes.
+    ///      `RootAge.t.sol` asserts the relationship rather than leaving it to a comment.
+    ///
+    ///      Immutable for the same reason as `minAnonymitySet`: a settable timing defence is
+    ///      one an operator can switch off for a single block.
+    uint256 public immutable minRootAge;
+
     /// @notice How many deposits have EVER been made. Never decremented.
     ///
     /// @dev The gate for BETTING, and deliberately not a per-denomination figure.
@@ -396,12 +418,35 @@ contract ShieldedPool {
     error AnonymitySetTooSmall(uint256 have, uint256 need);
     error DenominationTooRare(uint256 amount, uint256 have, uint256 need);
     error MinAnonymitySetTooSmall();
+    /// @dev Carries both figures so a client can say "wait another 40 seconds" rather than
+    ///      only "no", which is the difference between a retryable error and a dead end.
+    error RootTooRecent(uint256 age, uint256 need);
     /// @dev A settled market paid out more than its own published total.
     error MarketOverdrawn(uint32 marketId);
 
     modifier onlySequencer() {
         if (msg.sender != sequencer) revert NotSequencer();
         _;
+    }
+
+    /// @notice The three numbers that define this deployment's privacy posture.
+    ///
+    /// @dev Grouped into a struct rather than passed as three more arguments because the
+    ///      constructor hit `Stack too deep` at thirteen. `via_ir` stays off so the gas
+    ///      figures in MEASUREMENTS.md remain comparable across the project's history, which
+    ///      makes argument count a real constraint rather than a style preference.
+    ///
+    ///      All three become immutables. None of them is settable, and that is the point: a
+    ///      privacy parameter an operator can lower on demand protects nobody, because the
+    ///      people relying on it cannot see the moment it changed.
+    struct Policy {
+        /// Base units per denomination unit.
+        uint256 denomination;
+        /// Deposits required before anyone may bet. See `minAnonymitySet`.
+        uint256 minAnonymitySet;
+        /// Seconds a root must have existed before an action may prove against it.
+        /// Zero disables the check. See `minRootAge` for the ring-buffer constraint.
+        uint256 minRootAge;
     }
 
     constructor(
@@ -413,8 +458,7 @@ contract ShieldedPool {
         IActionVerifier betVerifier_,
         IActionVerifier8 betEncryptedVerifier_,
         IERC20 collateral_,
-        uint256 denomination_,
-        uint256 minAnonymitySet_,
+        Policy memory policy_,
         address sequencer_,
         address admin_
     ) {
@@ -423,10 +467,10 @@ contract ShieldedPool {
         // unlimited double-spends -- see that contract's notice.
         if (!nullifiers_.enforcesOnChain()) revert NullifierSetCannotEnforce();
         if (address(collateral_) == address(0)) revert InvalidCollateral();
-        if (denomination_ == 0) revert InvalidCollateral();
+        if (policy_.denomination == 0) revert InvalidCollateral();
         // A "minimum anonymity set" of 1 is a contradiction: the gate would pass for the only
         // note in the pool, which is the exact case it exists to refuse.
-        if (minAnonymitySet_ < 2) revert MinAnonymitySetTooSmall();
+        if (policy_.minAnonymitySet < 2) revert MinAnonymitySetTooSmall();
 
         tree = tree_;
         nullifiers = nullifiers_;
@@ -436,8 +480,9 @@ contract ShieldedPool {
         betVerifier = betVerifier_;
         betEncryptedVerifier = betEncryptedVerifier_;
         collateral = collateral_;
-        denomination = denomination_;
-        minAnonymitySet = minAnonymitySet_;
+        denomination = policy_.denomination;
+        minAnonymitySet = policy_.minAnonymitySet;
+        minRootAge = policy_.minRootAge;
         sequencer = sequencer_;
         admin = admin_;
     }
@@ -593,6 +638,7 @@ contract ShieldedPool {
         // Accept any root in the history window. Without it, every batch insertion
         // would invalidate all in-flight proofs and users would race the sequencer.
         if (!tree.isKnownRoot(root)) revert UnknownRoot();
+        _requireRootAge(root);
         if (nullifiers.isSpent(nullifierHash)) revert NullifierAlreadySpent();
 
         if (!betVerifier.verifyProof(pA, pB, pC, [root, nullifierHash, newCommitment, betData])) {
@@ -689,6 +735,7 @@ contract ShieldedPool {
         if (block.timestamp >= vault.bettingCloseTime()) revert BettingClosed();
 
         if (!tree.isKnownRoot(root)) revert UnknownRoot();
+        _requireRootAge(root);
         if (nullifiers.isSpent(nullifierHash)) revert NullifierAlreadySpent();
     }
 
@@ -804,6 +851,7 @@ contract ShieldedPool {
         uint256 redeemMeta
     ) external {
         if (!tree.isKnownRoot(root)) revert UnknownRoot();
+        _requireRootAge(root);
         if (nullifiers.isSpent(nullifierHash)) revert NullifierAlreadySpent();
 
         _checkRedeemMeta(redeemMeta);
@@ -917,6 +965,7 @@ contract ShieldedPool {
         uint256 withdrawData
     ) external {
         if (!tree.isKnownRoot(root)) revert UnknownRoot();
+        _requireRootAge(root);
         if (nullifiers.isSpent(nullifierHash)) revert NullifierAlreadySpent();
 
         (uint32 marketId, address recipient, uint256 amount) = _unpackWithdrawData(withdrawData);
@@ -986,6 +1035,17 @@ contract ShieldedPool {
     ///      Bootstrapping cost, stated plainly: the first `minAnonymitySet` deposits cannot
     ///      bet at all. That is the honest consequence of refusing to let anyone bet into a
     ///      crowd that does not exist, and there is no version of this gate without it.
+    /// @dev Refuse an action proving against a root that is too fresh.
+    ///
+    ///      Always called AFTER `isKnownRoot`, never instead of it: `rootAge` returns 0 for an
+    ///      unknown root as well as for a brand-new one, so on its own it would report the
+    ///      wrong reason for a root that has simply aged out of the ring buffer.
+    function _requireRootAge(uint256 root) private view {
+        if (minRootAge == 0) return;
+        uint256 age = tree.rootAge(root);
+        if (age < minRootAge) revert RootTooRecent(age, minRootAge);
+    }
+
     function _requireAnonymitySet() private view {
         if (totalDeposits < minAnonymitySet) {
             revert AnonymitySetTooSmall(totalDeposits, minAnonymitySet);

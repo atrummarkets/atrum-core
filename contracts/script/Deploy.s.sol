@@ -77,6 +77,18 @@ contract Deploy is Script {
     ///      which is the point of not making it settable.
     uint256 constant MIN_ANONYMITY_SET = 8;
 
+    /// @notice How old the root an action proves against must be. Zero disables the check.
+    ///
+    /// @dev Defaults to 0 so a deployment is usable the moment it exists, and is raised
+    ///      deliberately with `MIN_ROOT_AGE`. It cannot be defaulted to a useful value here
+    ///      without knowing the sequencer's batch cadence: the admissible window is
+    ///      `[minRootAge, ROOT_HISTORY_SIZE batches]`, and a value above the time 64 batches
+    ///      take makes that window EMPTY and every action revert.
+    ///
+    ///      At the 20s cadence this repo's sequencer runs, 64 batches is ~21 minutes, so
+    ///      anything up to a few minutes is safe and 120 is a reasonable starting point.
+    uint256 constant MIN_ROOT_AGE = 0;
+
     /// @dev Odds are published hourly, never continuously -- see the contract's notice.
     uint256 constant MIN_PUBLISH_INTERVAL = 1 hours;
 
@@ -247,8 +259,11 @@ contract Deploy is Script {
             IActionVerifier(d.betVerifier),
             IActionVerifier8(d.betEncryptedVerifier),
             IERC20(d.collateral),
-            DENOM,
-            vm.envOr("MIN_ANONYMITY_SET", MIN_ANONYMITY_SET),
+            ShieldedPool.Policy({
+                denomination: DENOM,
+                minAnonymitySet: vm.envOr("MIN_ANONYMITY_SET", MIN_ANONYMITY_SET),
+                minRootAge: vm.envOr("MIN_ROOT_AGE", MIN_ROOT_AGE)
+            }),
             sequencer,
             deployer
         );

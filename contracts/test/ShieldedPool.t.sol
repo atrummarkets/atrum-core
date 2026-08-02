@@ -70,6 +70,12 @@ contract ShieldedPoolTest is Test {
     ///      blocks everything. `AnonymitySetGate.t.sol` covers the gate at real values.
     uint256 constant MIN_ANON_SET = 2;
 
+    /// @dev Zero in every suite but `RootAge.t.sol`. The recorded lifecycle bets against the
+    ///      root of the batch it was built on, and `vm.warp`ing between every step to age it
+    ///      would change nothing about what those suites test while making each of them
+    ///      depend on a timing constant they do not care about.
+    uint256 constant MIN_ROOT_AGE = 0;
+
     uint256 constant UNITS = 100;
 
     /// keccak256("atrum.shielded.empty") reduced into the BN254 scalar field. MUST
@@ -126,8 +132,11 @@ contract ShieldedPoolTest is Test {
             IActionVerifier(address(betVerifier)),
             IActionVerifier8(address(betEncryptedVerifier)),
             IERC20(address(usdc)),
-            DENOM,
-            MIN_ANON_SET,
+            ShieldedPool.Policy({
+                denomination: DENOM,
+                minAnonymitySet: MIN_ANON_SET,
+                minRootAge: MIN_ROOT_AGE
+            }),
             sequencer,
             admin
         );

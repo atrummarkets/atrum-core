@@ -10,7 +10,7 @@
 import { describe, it, expect } from "vitest";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { parseRelayRequest, RelayError, RELAYABLE } from "../src/relay.ts";
+import { parseRelayRequest, RelayError, RELAYABLE, Relayer } from "../src/relay.ts";
 import { createPathHandler } from "../src/main.ts";
 
 const proof = {
@@ -183,5 +183,108 @@ describe("POST /relay", () => {
       // /relay is the first route sending content-type, which is what triggers preflight.
       expect(res.headers.get("access-control-allow-headers")).toContain("content-type");
     });
+  });
+});
+
+/**
+ * The off-chain half of the timing defence.
+ *
+ * Driven through a Relayer whose `dispatch` is stubbed, because what is under test is the
+ * HOLD-AND-SHUFFLE policy, not viem. Wiring a real chain in here would test the RPC and hide
+ * the ordering behaviour behind it.
+ */
+describe("Relayer release windows", () => {
+  /** A Relayer that records what it would have sent, in the order it would have sent it. */
+  function harness(releaseIntervalMs: number) {
+    const sent: string[] = [];
+    const relayer = new Relayer({
+      rpcUrl: "http://127.0.0.1:0",
+      chain: { id: 1 } as never,
+      poolAddress: "0x0000000000000000000000000000000000000001",
+      mnemonic: "test test test test test test test test test test test junk",
+      publicClient: {} as never,
+      relayerCount: 1,
+      releaseIntervalMs,
+    });
+
+    // Replace the network leg. Everything above it -- holding, shuffling, per-account nonce
+    // serialisation -- is real.
+    (relayer as unknown as { dispatch: (a: string, args: readonly unknown[]) => Promise<unknown> })
+      .dispatch = async (_action: string, args: readonly unknown[]) => {
+        sent.push(String(args[0]));
+        return { hash: "0x0", blockNumber: 1n, gasUsed: 1n, relayer: "0x0" };
+      };
+
+    return { relayer, sent };
+  }
+
+  it("forwards immediately when no interval is configured", async () => {
+    const { relayer, sent } = harness(0);
+    await relayer.submit("withdraw", ["a"]);
+    expect(sent).toEqual(["a"]);
+    expect(relayer.pending).toBe(0);
+  });
+
+  it("holds submissions instead of forwarding them", async () => {
+    const { relayer, sent } = harness(60_000);
+
+    void relayer.submit("withdraw", ["a"]);
+    void relayer.submit("withdraw", ["b"]);
+
+    // Nothing has been sent, and the callers are still waiting. That is the point: the
+    // relayer is deliberately NOT racing to forward.
+    expect(sent).toEqual([]);
+    expect(relayer.pending).toBe(2);
+  });
+
+  it("releases the whole window at once", async () => {
+    const { relayer, sent } = harness(60_000);
+
+    const first = relayer.submit("withdraw", ["a"]);
+    const second = relayer.submit("withdraw", ["b"]);
+    relayer.flush();
+
+    await Promise.all([first, second]);
+    expect(sent.slice().sort()).toEqual(["a", "b"]);
+    expect(relayer.pending).toBe(0);
+  });
+
+  it("does not preserve arrival order across many windows", async () => {
+    // The property that matters, stated as a property rather than as one shuffle's outcome:
+    // over enough windows, arrival order must NOT be the release order every time. A
+    // per-submission timer would pass every other test in this block and fail this one --
+    // and it is exactly the implementation someone would reach for first.
+    let sawReordering = false;
+
+    for (let round = 0; round < 40 && !sawReordering; round++) {
+      const { relayer, sent } = harness(60_000);
+      const inOrder = ["a", "b", "c", "d", "e", "f"];
+      const all = inOrder.map((x) => relayer.submit("withdraw", [x]));
+      relayer.flush();
+      await Promise.all(all);
+
+      if (sent.join(",") !== inOrder.join(",")) sawReordering = true;
+    }
+
+    expect(sawReordering).toBe(true);
+  });
+
+  it("loses nothing across a window", async () => {
+    const { relayer, sent } = harness(60_000);
+    const items = Array.from({ length: 20 }, (_, i) => `n${i}`);
+
+    const all = items.map((x) => relayer.submit("withdraw", [x]));
+    relayer.flush();
+    await Promise.all(all);
+
+    // Shuffling must not drop or duplicate. A subtle Fisher-Yates bug does exactly that, and
+    // for a user it looks like their withdrawal silently never happened.
+    expect(sent.slice().sort()).toEqual(items.slice().sort());
+  });
+
+  it("flushing an empty window is a no-op", async () => {
+    const { relayer, sent } = harness(60_000);
+    relayer.flush();
+    expect(sent).toEqual([]);
   });
 });

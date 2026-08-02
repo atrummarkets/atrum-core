@@ -81,6 +81,23 @@ contract IncrementalMerkleTree {
     uint256[ROOT_HISTORY_SIZE] public rootHistory;
     uint256 public currentRootIndex;
 
+    /// @notice When each root in the ring buffer was recorded, same indexing.
+    ///
+    /// @dev Kept so an action can be required to prove against a root that is not brand new.
+    ///
+    ///      WHY THAT MATTERS. Without it, the strongest signal linking a deposit to the bet
+    ///      that spends it is simply time. Deposit, wait for the next batch, bet -- and an
+    ///      observer who sees a bet land moments after a batch containing exactly one new
+    ///      commitment does not need to break any cryptography. Proving against an OLDER
+    ///      root forces every action to be spendable only out of a crowd that has already
+    ///      accumulated, and decouples "when the note appeared" from "when it was spent".
+    ///
+    ///      Stored as `uint64`: seconds since the epoch fits until the year 2554, and eight
+    ///      of them share a slot, so the whole 64-entry history costs 8 slots rather than 64.
+    ///      On Monad, where a cold SLOAD is ~8,100 gas, that packing is the difference
+    ///      between this being free and it being a second gas problem.
+    uint64[ROOT_HISTORY_SIZE] public rootTimestamp;
+
     error TreeFull();
     error LeafNotInField();
     error EmptyBatch();
@@ -118,6 +135,10 @@ contract IncrementalMerkleTree {
 
         root = current;
         rootHistory[0] = current;
+        // The empty root is as old as the tree. Leaving it at zero would make it look
+        // infinitely old, which is harmless here but would be a silent lie if the buffer
+        // were ever read before the first insertion.
+        rootTimestamp[0] = uint64(block.timestamp);
     }
 
     function _hash(uint256 left, uint256 right) internal view returns (uint256) {
@@ -219,6 +240,7 @@ contract IncrementalMerkleTree {
         uint256 nextRootIndex = (currentRootIndex + 1) % ROOT_HISTORY_SIZE;
         currentRootIndex = nextRootIndex;
         rootHistory[nextRootIndex] = currentHash;
+        rootTimestamp[nextRootIndex] = uint64(block.timestamp);
 
         emit LeavesInserted(start, n, currentHash);
     }
@@ -274,6 +296,7 @@ contract IncrementalMerkleTree {
         uint256 nextRootIndex = (currentRootIndex + 1) % ROOT_HISTORY_SIZE;
         currentRootIndex = nextRootIndex;
         rootHistory[nextRootIndex] = newRoot;
+        rootTimestamp[nextRootIndex] = uint64(block.timestamp);
 
         emit LeavesInserted(start, count, newRoot);
     }
@@ -290,5 +313,35 @@ contract IncrementalMerkleTree {
             i = i == 0 ? ROOT_HISTORY_SIZE - 1 : i - 1;
         }
         return false;
+    }
+
+    /// @notice How long ago `candidate` was recorded, in seconds. 0 if it is not a known root.
+    ///
+    /// @dev Returns 0 for BOTH "unknown" and "recorded this very second". That ambiguity is
+    ///      deliberate and safe here because both answers fail the same way at every call
+    ///      site: an age of 0 is below any minimum worth setting. Callers must still check
+    ///      `isKnownRoot` separately -- this is an age, not an admission check.
+    ///
+    ///      Walks newest-first, matching `isKnownRoot`, so a proof against the latest root
+    ///      exits on the first iteration.
+    ///
+    ///      DUPLICATE ROOTS. The same root value can appear more than once in the buffer if
+    ///      the tree wrapped without changing (it cannot today -- every insertion changes the
+    ///      root -- but this is not enforced). Newest-first means the age returned is the
+    ///      SMALLEST, which is the conservative direction: an age gate would refuse rather
+    ///      than admit.
+    function rootAge(uint256 candidate) external view returns (uint256) {
+        if (candidate == 0) return 0;
+
+        uint256 i = currentRootIndex;
+        for (uint256 n = 0; n < ROOT_HISTORY_SIZE; n++) {
+            if (rootHistory[i] == candidate) {
+                uint64 recordedAt = rootTimestamp[i];
+                if (recordedAt == 0 || block.timestamp <= recordedAt) return 0;
+                return block.timestamp - recordedAt;
+            }
+            i = i == 0 ? ROOT_HISTORY_SIZE - 1 : i - 1;
+        }
+        return 0;
     }
 }

@@ -244,9 +244,21 @@ async function main(): Promise<void> {
       mnemonic: relayMnemonic,
       publicClient,
       relayerCount: Number(process.env.RELAY_ACCOUNTS ?? 5),
+      releaseIntervalMs: Number(process.env.RELAY_RELEASE_INTERVAL_MS ?? 0),
     });
     console.log(`relaying enabled, ${relayer.addresses.length} account(s): ${relayer.addresses.join(", ")}`);
     console.log("fund these, or every relayed action fails with insufficient balance");
+    if (relayer.releaseIntervalMs > 0) {
+      console.log(
+        `holding submissions ${relayer.releaseIntervalMs}ms and releasing them shuffled, so ` +
+          "arrival order carries no information",
+      );
+    } else {
+      console.log(
+        "RELAY_RELEASE_INTERVAL_MS unset -- submissions forward immediately, so the order " +
+          "they were requested in is the order they land in",
+      );
+    }
   } else {
     console.log("relaying DISABLED (set RELAY_MNEMONIC to enable) -- users submit their own txs,");
     console.log("which means their address is on chain next to every action they take");

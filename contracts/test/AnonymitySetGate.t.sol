@@ -60,6 +60,12 @@ contract AnonymitySetGateTest is Test {
     /// @dev The production value. This suite exists precisely to run at it.
     uint256 constant K = 8;
 
+    /// @dev Zero in every suite but `RootAge.t.sol`. The recorded lifecycle bets against the
+    ///      root of the batch it was built on, and `vm.warp`ing between every step to age it
+    ///      would change nothing about what those suites test while making each of them
+    ///      depend on a timing constant they do not care about.
+    uint256 constant MIN_ROOT_AGE = 0;
+
     uint256 constant R = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
     uint256 constant ZERO_VALUE = uint256(keccak256("atrum.shielded.empty")) % R;
 
@@ -99,8 +105,11 @@ contract AnonymitySetGateTest is Test {
             IActionVerifier(address(bv)),
             IActionVerifier8(address(bev)),
             IERC20(address(usdc)),
-            DENOM,
-            K,
+            ShieldedPool.Policy({
+                denomination: DENOM,
+                minAnonymitySet: K,
+                minRootAge: MIN_ROOT_AGE
+            }),
             sequencer,
             address(this)
         );
@@ -132,8 +141,11 @@ contract AnonymitySetGateTest is Test {
             IActionVerifier(address(0xB1)),
             IActionVerifier8(address(0xB8)),
             IERC20(address(usdc)),
-            DENOM,
-            1,
+            ShieldedPool.Policy({
+                denomination: DENOM,
+                minAnonymitySet: 1,
+                minRootAge: MIN_ROOT_AGE
+            }),
             sequencer,
             address(this)
         );

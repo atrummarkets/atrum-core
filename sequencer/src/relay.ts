@@ -172,6 +172,21 @@ export interface RelayerConfig {
   mnemonic: string;
   publicClient: PublicClient;
   relayerCount?: number;
+  /**
+   * How long to hold a submission before releasing it, in milliseconds. 0 disables holding.
+   *
+   * See `Relayer`'s notice: this is the off-chain half of the timing defence, and it is the
+   * half a user cannot verify. It is worth having anyway, and worth being honest about.
+   */
+  releaseIntervalMs?: number;
+}
+
+/** A submission waiting for its release window. */
+interface Held {
+  action: RelayableAction;
+  args: readonly unknown[];
+  resolve: (r: RelayResult) => void;
+  reject: (e: unknown) => void;
 }
 
 /**
@@ -187,6 +202,23 @@ export interface RelayerConfig {
  * Round-robin across accounts (from RelayerPool) gives back the parallelism that serialising
  * costs, and is the same rotation the sequencer uses to avoid a single fixed submitter
  * address becoming a landmark.
+ *
+ * BATCHING AND SHUFFLING -- the off-chain half of the timing defence
+ *
+ * Forwarding each action the instant it arrives makes ORDER a channel. Alice's request lands
+ * before Bob's, so Alice's transaction is mined first, and anyone correlating request timing
+ * against on-chain order learns which is which. The on-chain root-age rule stops a note being
+ * spent out of the batch that created it; it does nothing about the order of what is already
+ * eligible.
+ *
+ * So submissions are held for a fixed window and released in a shuffled batch. Everything in
+ * one window becomes order-indistinguishable.
+ *
+ * WHAT THIS DOES NOT DO, STATED PLAINLY. This is the relayer promising to behave. It sees
+ * every request with its arrival time and its network address, and a user cannot verify that
+ * the shuffle happened -- unlike the root-age rule, which is a consensus check they can read
+ * off the chain. It raises the cost of passive correlation; it is not a defence against the
+ * relayer itself. That asymmetry is exactly why the on-chain half exists.
  */
 export class Relayer {
   private readonly relayers: RelayerPool;
@@ -194,9 +226,44 @@ export class Relayer {
   /** Per-account tail of the submission chain, keyed by address. */
   private readonly queues = new Map<Address, Promise<unknown>>();
 
+  /** Submissions waiting for the current release window to close. */
+  private held: Held[] = [];
+  private releaseTimer: ReturnType<typeof setTimeout> | undefined;
+
   constructor(config: RelayerConfig) {
     this.config = config;
     this.relayers = new RelayerPool(config.mnemonic, config.relayerCount ?? 1);
+  }
+
+  /** Milliseconds a submission is held before release. 0 means immediate. */
+  get releaseIntervalMs(): number {
+    return this.config.releaseIntervalMs ?? 0;
+  }
+
+  /** How many submissions are currently waiting for a release window. */
+  get pending(): number {
+    return this.held.length;
+  }
+
+  /**
+   * Release everything held, in a random order.
+   *
+   * Exposed so tests can drive the window deterministically rather than sleeping, and so a
+   * shutdown can flush rather than drop submissions users are waiting on.
+   */
+  flush(): void {
+    if (this.releaseTimer !== undefined) {
+      clearTimeout(this.releaseTimer);
+      this.releaseTimer = undefined;
+    }
+
+    const batch = this.held;
+    this.held = [];
+    if (batch.length === 0) return;
+
+    for (const item of shuffle(batch)) {
+      this.dispatch(item.action, item.args).then(item.resolve, item.reject);
+    }
   }
 
   get addresses(): Address[] {
@@ -204,6 +271,23 @@ export class Relayer {
   }
 
   async submit(action: RelayableAction, args: readonly unknown[]): Promise<RelayResult> {
+    if (this.releaseIntervalMs <= 0) return this.dispatch(action, args);
+
+    return new Promise<RelayResult>((resolve, reject) => {
+      this.held.push({ action, args, resolve, reject });
+
+      // One timer per WINDOW, not per submission. A timer per submission would release each
+      // one exactly `releaseIntervalMs` after it arrived, preserving arrival order perfectly
+      // -- a delay that looks like a defence and provides none.
+      if (this.releaseTimer === undefined) {
+        this.releaseTimer = setTimeout(() => this.flush(), this.releaseIntervalMs);
+        // Do not hold the process open for an empty window.
+        this.releaseTimer.unref?.();
+      }
+    });
+  }
+
+  private async dispatch(action: RelayableAction, args: readonly unknown[]): Promise<RelayResult> {
     const account = this.relayers.next();
 
     const previous = this.queues.get(account.address) ?? Promise.resolve();
@@ -261,4 +345,21 @@ export class Relayer {
       relayer: account.address,
     };
   }
+}
+
+/**
+ * Fisher-Yates, on a copy.
+ *
+ * `Math.random` is deliberate: this shuffles submission order, not key material, and an
+ * observer who can predict it still has to be the relayer to use it. Reaching for a CSPRNG
+ * here would suggest the shuffle carries a cryptographic guarantee, which it does not -- the
+ * guarantee is the on-chain root-age rule.
+ */
+function shuffle<T>(items: readonly T[]): T[] {
+  const out = items.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j]!, out[i]!];
+  }
+  return out;
 }
