@@ -48,6 +48,13 @@ contract EncryptedParimutuelPoolTest is Test {
 
     uint32 constant MARKET_ID = 8;
     uint256 constant DENOM = 1e6;
+
+    /// @dev The test minimum, not the production one. `ShieldedPool` documents 8 as the
+    ///      intended value; the recorded lifecycle contains four deposits in total, so a
+    ///      suite pinned to 8 could never reach a bet and would only ever prove the gate
+    ///      blocks everything. `AnonymitySetGate.t.sol` covers the gate at real values.
+    uint256 constant MIN_ANON_SET = 2;
+
     uint256 constant MIN_PUBLISH_INTERVAL = 1 hours;
 
     uint256 constant ZERO_VALUE = uint256(keccak256("atrum.shielded.empty"))
@@ -92,6 +99,7 @@ contract EncryptedParimutuelPoolTest is Test {
             IActionVerifier8(address(bev)),
             IERC20(address(usdc)),
             DENOM,
+            MIN_ANON_SET,
             sequencer,
             address(this)
         );

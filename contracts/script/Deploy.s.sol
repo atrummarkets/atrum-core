@@ -68,6 +68,15 @@ contract Deploy is Script {
 
     uint256 constant DENOM = 1e6;
 
+    /// @notice The production minimum anonymity set. Overridable for testnet with
+    ///         `MIN_ANONYMITY_SET`, because a fresh chain has nobody to hide among and the
+    ///         first eight deposits per rung would otherwise be unable to do anything.
+    ///
+    /// @dev A deployment running below this is a TEST deployment. The value is immutable on
+    ///      the pool and readable on chain, so anyone can check which kind they are using --
+    ///      which is the point of not making it settable.
+    uint256 constant MIN_ANONYMITY_SET = 8;
+
     /// @dev Odds are published hourly, never continuously -- see the contract's notice.
     uint256 constant MIN_PUBLISH_INTERVAL = 1 hours;
 
@@ -239,6 +248,7 @@ contract Deploy is Script {
             IActionVerifier8(d.betEncryptedVerifier),
             IERC20(d.collateral),
             DENOM,
+            vm.envOr("MIN_ANONYMITY_SET", MIN_ANONYMITY_SET),
             sequencer,
             deployer
         );

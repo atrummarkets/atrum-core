@@ -89,6 +89,13 @@ contract CheckupTest is Test {
 
     uint32 constant MARKET_ID = 7;
     uint256 constant DENOM = 1e6;
+
+    /// @dev The test minimum, not the production one. `ShieldedPool` documents 8 as the
+    ///      intended value; the recorded lifecycle contains four deposits in total, so a
+    ///      suite pinned to 8 could never reach a bet and would only ever prove the gate
+    ///      blocks everything. `AnonymitySetGate.t.sol` covers the gate at real values.
+    uint256 constant MIN_ANON_SET = 2;
+
     uint256 constant R = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
     uint256 constant ZERO_VALUE = uint256(keccak256("atrum.shielded.empty")) % R;
 
@@ -211,6 +218,7 @@ contract CheckupTest is Test {
             IActionVerifier8(address(bev)),
             IERC20(address(usdc)),
             DENOM,
+            MIN_ANON_SET,
             sequencer,
             address(this)
         );
@@ -384,7 +392,7 @@ contract CheckupTest is Test {
         _section("deposit (real Groth16 proof)");
 
         lifeUnits = _u(".deposit.units");
-        usdc.mint(depositor, lifeUnits * DENOM);
+        usdc.mint(depositor, (lifeUnits + _u(".depositLadder.units")) * DENOM);
 
         // Fixture reads are `vm.parseJson` cheatcodes and cost real gas, so they are
         // hoisted OUT of the measured region. Left inline they inflated `bet` by ~971,000
@@ -400,13 +408,33 @@ contract CheckupTest is Test {
         uint256 g = gasleft();
         pool.deposit(pA, pB, pC, commitment, lifeUnits);
         gasDeposit = g - gasleft();
+
+        // Batch 1's second deposit, at a different rung. Never spent -- it exists so the pool
+        // satisfies its own anonymity-set gate, which refuses a bet into a crowd of one.
+        pool.deposit(
+            _pA("depositLadder"),
+            _pB("depositLadder"),
+            _pC("depositLadder"),
+            _u(".depositLadder.commitment"),
+            _u(".depositLadder.units")
+        );
         vm.stopPrank();
 
-        _eq(pool.queuedCount(), 1, "deposit -> commitment queued");
+        _eq(pool.queuedCount(), 2, "deposit -> both commitments queued");
         // Shared custody, not a per-market complete set: a deposit names no market, so there
         // is nothing to split into and the collateral simply sits in the pool.
-        _eq(usdc.balanceOf(address(pool)), lifeUnits * DENOM, "deposit -> pool holds collateral");
-        _eq(pool.totalDepositedUnits(), lifeUnits, "deposit -> counted toward solvency bound");
+        uint256 ladderUnits = _u(".depositLadder.units");
+        _eq(
+            usdc.balanceOf(address(pool)),
+            (lifeUnits + ladderUnits) * DENOM,
+            "deposit -> pool holds collateral"
+        );
+        _eq(
+            pool.totalDepositedUnits(),
+            lifeUnits + ladderUnits,
+            "deposit -> counted toward solvency bound"
+        );
+        _eq(pool.totalDeposits(), 2, "deposit -> counted toward the anonymity set");
         _eq(vault.yesBalance(address(pool)), 0, "deposit -> mints nothing");
         _reportGas("deposit", gasDeposit);
     }
@@ -420,7 +448,7 @@ contract CheckupTest is Test {
         pool.flushBatch(real1);
         gasFlush = g - gasleft();
 
-        _eq(pool.insertedCount(), 1, "flushBatch -> only real commitments consumed");
+        _eq(pool.insertedCount(), 2, "flushBatch -> only real commitments consumed");
         _eq(tree.nextIndex(), 64, "flushBatch -> full aligned subtree grafted");
         _eq(tree.root(), _u(".rootAfterBatch1"), "flushBatch -> root matches the prover's mirror");
         _check(
@@ -451,7 +479,7 @@ contract CheckupTest is Test {
         _check(nullifiers.isSpent(nh), "bet -> nullifier burned", "double-spend blocked");
         _eq(parimutuel.totalUnits(MARKET_ID), lifeUnits, "bet -> stake recorded");
         _eq(parimutuel.yesProbabilityBps(MARKET_ID), 10_000, "bet -> published odds (one-sided = 100%)");
-        _eq(pool.queuedCount(), 2, "bet -> replacement note queued");
+        _eq(pool.queuedCount(), 3, "bet -> replacement note queued");
         _reportGas("bet", gasBet);
 
         (bool replay,) =

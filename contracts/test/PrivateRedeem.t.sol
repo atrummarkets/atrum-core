@@ -70,6 +70,13 @@ contract PrivateRedeemTest is Test {
     uint32 constant MARKET_ID = 7;
     uint32 constant ENCRYPTED_MARKET_ID = 8;
     uint256 constant DENOM = 1e6;
+
+    /// @dev The test minimum, not the production one. `ShieldedPool` documents 8 as the
+    ///      intended value; the recorded lifecycle contains four deposits in total, so a
+    ///      suite pinned to 8 could never reach a bet and would only ever prove the gate
+    ///      blocks everything. `AnonymitySetGate.t.sol` covers the gate at real values.
+    uint256 constant MIN_ANON_SET = 2;
+
     uint256 constant MIN_PUBLISH_INTERVAL = 1 hours;
     uint256 constant R = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
     uint256 constant ZERO_VALUE = uint256(keccak256("atrum.shielded.empty")) % R;
@@ -119,6 +126,7 @@ contract PrivateRedeemTest is Test {
             IActionVerifier8(address(bev)),
             IERC20(address(usdc)),
             DENOM,
+            MIN_ANON_SET,
             sequencer,
             address(this)
         );
@@ -197,8 +205,19 @@ contract PrivateRedeemTest is Test {
         vm.prank(depositor);
         usdc.approve(address(pool), type(uint256).max);
 
-        vm.prank(depositor);
+        vm.startPrank(depositor);
         pool.deposit(_pA("deposit"), _pB("deposit"), _pC("deposit"), _a(".deposit.commitment"), units);
+        // Batch 1's second deposit, at a different rung and never spent. It is what makes the
+        // pool satisfy its own anonymity-set gate, and what makes 10 a rung more than one note
+        // has ever used -- which the settled withdrawal below (10 units) needs.
+        pool.deposit(
+            _pA("depositLadder"),
+            _pB("depositLadder"),
+            _pC("depositLadder"),
+            _a(".depositLadder.commitment"),
+            _a(".depositLadder.units")
+        );
+        vm.stopPrank();
         _flush(".batch1Real");
 
         pool.bet(
@@ -780,8 +799,12 @@ contract PrivateRedeemTest is Test {
     function test_withdraw_rejectsInflatedAmount() public {
         _runToWithdrawable();
 
+        // Inflated to 100 rather than to some arbitrary larger number, because two checks now
+        // sit in front of the verifier: the amount must be on the ladder, and its rung must be
+        // one other deposits have used. Picking a rung that fails either would make this pass
+        // for a reason that has nothing to do with the proof binding the amount.
         uint256 data = _a(".withdraw.withdrawData");
-        uint256 inflated = (data & ~((uint256(1) << 40) - 1)) | 1000;
+        uint256 inflated = (data & ~((uint256(1) << 40) - 1)) | 100;
 
         vm.expectRevert(ShieldedPool.InvalidProof.selector);
         pool.withdraw(
@@ -818,6 +841,7 @@ contract PrivateRedeemTest is Test {
             IActionVerifier8(address(bev)),
             IERC20(address(usdc)),
             DENOM,
+            MIN_ANON_SET,
             sequencer,
             address(this)
         );

@@ -76,6 +76,13 @@ contract ShieldedPoolSolvencyTest is Test {
     uint32 constant MARKET_ID = 7;
     uint32 constant ENCRYPTED_MARKET_ID = 8;
     uint256 constant DENOM = 1e6;
+
+    /// @dev The test minimum, not the production one. `ShieldedPool` documents 8 as the
+    ///      intended value; the recorded lifecycle contains four deposits in total, so a
+    ///      suite pinned to 8 could never reach a bet and would only ever prove the gate
+    ///      blocks everything. `AnonymitySetGate.t.sol` covers the gate at real values.
+    uint256 constant MIN_ANON_SET = 2;
+
     uint256 constant MIN_PUBLISH_INTERVAL = 1 hours;
     uint256 constant R = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
     uint256 constant ZERO_VALUE = uint256(keccak256("atrum.shielded.empty")) % R;
@@ -129,6 +136,7 @@ contract ShieldedPoolSolvencyTest is Test {
             IActionVerifier8(address(bev)),
             IERC20(address(usdc)),
             DENOM,
+            MIN_ANON_SET,
             address(handler),
             address(this)
         );
@@ -180,14 +188,28 @@ contract ShieldedPoolSolvencyTest is Test {
     ///      and 4 would leave `redeemPrivate` and everything downstream permanently
     ///      unreachable -- and the invariant would pass over a pool that never paid anyone.
     function _buildCalls() internal view returns (bytes[] memory calls) {
-        calls = new bytes[](17);
+        calls = new bytes[](18);
 
         calls[0] = abi.encodeCall(
             ShieldedPool.deposit,
             (_pA("deposit"), _pB("deposit"), _pC("deposit"), _a(".deposit.commitment"), _a(".deposit.units"))
         );
-        calls[1] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch1Real")));
-        calls[2] = abi.encodeCall(
+        // Batch 1's second deposit, at a different rung and never spent. Without it the pool
+        // never satisfies its own anonymity-set gate and every bet below is unreachable --
+        // which the invariants would not notice, because they would simply hold over a pool
+        // that never bet.
+        calls[1] = abi.encodeCall(
+            ShieldedPool.deposit,
+            (
+                _pA("depositLadder"),
+                _pB("depositLadder"),
+                _pC("depositLadder"),
+                _a(".depositLadder.commitment"),
+                _a(".depositLadder.units")
+            )
+        );
+        calls[2] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch1Real")));
+        calls[3] = abi.encodeCall(
             ShieldedPool.bet,
             (
                 _pA("bet"),
@@ -199,8 +221,8 @@ contract ShieldedPoolSolvencyTest is Test {
                 _a(".bet.betData")
             )
         );
-        calls[3] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch2Real")));
-        calls[4] = abi.encodeCall(
+        calls[4] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch2Real")));
+        calls[5] = abi.encodeCall(
             ShieldedPool.deposit,
             (
                 _pA("depositEncrypted"),
@@ -210,8 +232,8 @@ contract ShieldedPoolSolvencyTest is Test {
                 _a(".depositEncrypted.units")
             )
         );
-        calls[5] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch3Real")));
-        calls[6] = abi.encodeCall(
+        calls[6] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch3Real")));
+        calls[7] = abi.encodeCall(
             ShieldedPool.betEncrypted,
             (
                 _pA("betEncrypted"),
@@ -224,7 +246,7 @@ contract ShieldedPoolSolvencyTest is Test {
                 _ct("betEncrypted")
             )
         );
-        calls[7] = abi.encodeCall(
+        calls[8] = abi.encodeCall(
             ShieldedPool.deposit,
             (
                 _pA("depositEncrypted2"),
@@ -234,8 +256,8 @@ contract ShieldedPoolSolvencyTest is Test {
                 _a(".depositEncrypted2.units")
             )
         );
-        calls[8] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch4Real")));
-        calls[9] = abi.encodeCall(
+        calls[9] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch4Real")));
+        calls[10] = abi.encodeCall(
             ShieldedPool.betEncrypted,
             (
                 _pA("betEncrypted2"),
@@ -248,8 +270,8 @@ contract ShieldedPoolSolvencyTest is Test {
                 _ct("betEncrypted2")
             )
         );
-        calls[10] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch5Real")));
-        calls[11] = abi.encodeCall(
+        calls[11] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch5Real")));
+        calls[12] = abi.encodeCall(
             ShieldedPool.redeemPrivate,
             (
                 _pA("redeemPrivate"),
@@ -261,8 +283,8 @@ contract ShieldedPoolSolvencyTest is Test {
                 _a(".redeemPrivate.redeemMeta")
             )
         );
-        calls[12] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch6Real")));
-        calls[13] = abi.encodeCall(
+        calls[13] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch6Real")));
+        calls[14] = abi.encodeCall(
             ShieldedPool.withdraw,
             (
                 _pA("withdraw"),
@@ -274,7 +296,7 @@ contract ShieldedPoolSolvencyTest is Test {
                 _a(".withdraw.withdrawData")
             )
         );
-        calls[14] = abi.encodeCall(
+        calls[15] = abi.encodeCall(
             ShieldedPool.deposit,
             (
                 _pA("depositUnbetExit"),
@@ -284,10 +306,10 @@ contract ShieldedPoolSolvencyTest is Test {
                 _a(".depositUnbetExit.units")
             )
         );
-        calls[15] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch7Real")));
+        calls[16] = abi.encodeCall(ShieldedPool.flushBatch, (actions.readUintArray(".batch7Real")));
         // The unbet exit skips every per-market check, so the global bound is the only thing
         // guarding it. It has to be in the reachable set for this invariant to mean anything.
-        calls[16] = abi.encodeCall(
+        calls[17] = abi.encodeCall(
             ShieldedPool.withdraw,
             (
                 _pA("withdrawUnbet"),
@@ -357,7 +379,7 @@ contract ShieldedPoolSolvencyTest is Test {
     ///      moved -- green, and worth nothing. Driving the happy path in order, through the
     ///      same handler the fuzzer uses, proves the encoded calldata is live.
     function test_recordedLifecycleIsReachableThroughHandler() public {
-        for (uint256 i = 0; i < 11; i++) {
+        for (uint256 i = 0; i < 12; i++) {
             handler.perform(i); // deposit .. flushBatch(batch5)
         }
         assertGt(pool.totalDepositedUnits(), 0, "no deposit landed -- the encoded calldata is dead");
@@ -369,7 +391,7 @@ contract ShieldedPoolSolvencyTest is Test {
         handler.settleMarket();
         assertTrue(encrypted.settled(ENCRYPTED_MARKET_ID), "market never settled through the handler");
 
-        for (uint256 i = 11; i < 17; i++) {
+        for (uint256 i = 12; i < 18; i++) {
             handler.perform(i); // redeemPrivate .. withdrawUnbet
         }
         assertGt(pool.totalWithdrawnUnits(), 0, "nothing ever left the pool -- invariants would be vacuous");

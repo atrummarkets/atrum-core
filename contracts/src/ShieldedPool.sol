@@ -240,6 +240,52 @@ contract ShieldedPool {
     /// @notice Units paid out per market, bounded by that market's settled total.
     mapping(uint32 => uint256) public paidOutUnits;
 
+    /// @notice The smallest crowd this pool will let a user hide in.
+    ///
+    /// @dev Immutable and set at deploy time, because a settable K is not a security parameter
+    ///      at all -- an operator could drop it to 1 the moment a gate became inconvenient,
+    ///      and every user who had already relied on it would never know.
+    ///
+    ///      8 is the intended production value. Lower values exist only so a fresh deployment
+    ///      can be exercised end to end without first funding eight deposits per rung, and a
+    ///      deployment running below 8 should be described as a test deployment, not as a
+    ///      private one. The constructor refuses 1 outright: a set of one is not an anonymity
+    ///      set, it is a receipt, and permitting it would let a deployment advertise a gate
+    ///      that gates nothing.
+    uint256 public immutable minAnonymitySet;
+
+    /// @notice How many deposits have EVER been made. Never decremented.
+    ///
+    /// @dev The gate for BETTING, and deliberately not a per-denomination figure.
+    ///
+    ///      The original plan gated `betEncrypted` on the count for the note's own
+    ///      denomination. That is not implementable, for the same reason the deposit-time
+    ///      vault split was not: `betEncrypted` never receives `units`. The stake is
+    ///      encrypted -- that is the entire point -- so the contract cannot know which rung
+    ///      the spent note sits on.
+    ///
+    ///      It is also the wrong set. A bet proves membership in the tree and publishes no
+    ///      amount, so its anonymity set is every unspent note, not every note of one size.
+    ///      Denomination narrows the crowd only where a size becomes PUBLIC, which is
+    ///      `withdraw` -- see `depositsAtDenomination`.
+    ///
+    ///      This is an UPPER BOUND on the live set, not the figure itself: notes get spent and
+    ///      this never decrements. It cannot be exact without leaking which notes are still
+    ///      live, which is precisely what the pool exists to hide. The error reports the
+    ///      number so a caller can see what it actually is rather than inferring precision
+    ///      that is not there.
+    uint256 public totalDeposits;
+
+    /// @notice Deposits ever made at each rung of the ladder. Never decremented.
+    ///
+    /// @dev The gate for WITHDRAWING, where `amount` is public and therefore identifying.
+    ///      Withdraw 1,000 when yours is the only 1,000 that ever entered the pool and the
+    ///      withdrawal names you, whatever the proof hides.
+    ///
+    ///      Keyed by the amount in units, which is always a ladder rung on both sides:
+    ///      `deposit` refuses anything else, and so does `withdraw`.
+    mapping(uint256 => uint256) public depositsAtDenomination;
+
     /// @notice marketId -> Vault. Many markets share one tree, so they share one
     ///         anonymity set. One market per pool would make the tree an index of that
     ///         market's participants.
@@ -345,6 +391,11 @@ contract ShieldedPool {
     error MarketIdReserved();
     /// @dev The global bound: more units left than ever entered. Should be unreachable.
     error PoolInsolvent();
+    /// @dev Reports the real count alongside the requirement, so a caller learns how far off
+    ///      the pool is rather than only that it said no.
+    error AnonymitySetTooSmall(uint256 have, uint256 need);
+    error DenominationTooRare(uint256 amount, uint256 have, uint256 need);
+    error MinAnonymitySetTooSmall();
     /// @dev A settled market paid out more than its own published total.
     error MarketOverdrawn(uint32 marketId);
 
@@ -363,6 +414,7 @@ contract ShieldedPool {
         IActionVerifier8 betEncryptedVerifier_,
         IERC20 collateral_,
         uint256 denomination_,
+        uint256 minAnonymitySet_,
         address sequencer_,
         address admin_
     ) {
@@ -372,6 +424,9 @@ contract ShieldedPool {
         if (!nullifiers_.enforcesOnChain()) revert NullifierSetCannotEnforce();
         if (address(collateral_) == address(0)) revert InvalidCollateral();
         if (denomination_ == 0) revert InvalidCollateral();
+        // A "minimum anonymity set" of 1 is a contradiction: the gate would pass for the only
+        // note in the pool, which is the exact case it exists to refuse.
+        if (minAnonymitySet_ < 2) revert MinAnonymitySetTooSmall();
 
         tree = tree_;
         nullifiers = nullifiers_;
@@ -382,6 +437,7 @@ contract ShieldedPool {
         betEncryptedVerifier = betEncryptedVerifier_;
         collateral = collateral_;
         denomination = denomination_;
+        minAnonymitySet = minAnonymitySet_;
         sequencer = sequencer_;
         admin = admin_;
     }
@@ -494,6 +550,12 @@ contract ShieldedPool {
         }
 
         totalDepositedUnits += units;
+
+        // Both counters are monotonic. A decrementing counter would have to observe notes
+        // being spent, and which notes are still live is the thing the pool hides.
+        totalDeposits += 1;
+        depositsAtDenomination[units] += 1;
+
         _queue(commitment);
     }
 
@@ -518,6 +580,8 @@ contract ShieldedPool {
 
         if (outcome != OUTCOME_YES && outcome != OUTCOME_NO) revert InvalidOutcome();
         if (units == 0) revert ZeroUnits();
+
+        _requireAnonymitySet();
 
         Vault vault = marketVault[marketId];
         if (address(vault) == address(0)) revert MarketNotRegistered();
@@ -614,6 +678,8 @@ contract ShieldedPool {
         (uint32 marketId, uint8 outcome) = _unpackMarketMeta(betMeta);
 
         if (outcome != OUTCOME_YES && outcome != OUTCOME_NO) revert InvalidOutcome();
+
+        _requireAnonymitySet();
 
         Vault vault = marketVault[marketId];
         if (address(vault) == address(0)) revert MarketNotRegistered();
@@ -906,6 +972,26 @@ contract ShieldedPool {
         }
     }
 
+    /// @dev Refuse a bet that cannot be private.
+    ///
+    ///      A user betting into a pool of two is not making a private bet, they are making a
+    ///      public one with extra steps -- and they have no way to know that, because the
+    ///      proof looks identical either way. The whole point of putting this on-chain rather
+    ///      than in the client is that it cannot be skipped by calling the contract directly,
+    ///      and it protects users of clients nobody audited.
+    ///
+    ///      It also protects the people ALREADY in the pool. Every bet made into a set of two
+    ///      is a data point narrowing what the other note can be.
+    ///
+    ///      Bootstrapping cost, stated plainly: the first `minAnonymitySet` deposits cannot
+    ///      bet at all. That is the honest consequence of refusing to let anyone bet into a
+    ///      crowd that does not exist, and there is no version of this gate without it.
+    function _requireAnonymitySet() private view {
+        if (totalDeposits < minAnonymitySet) {
+            revert AnonymitySetTooSmall(totalDeposits, minAnonymitySet);
+        }
+    }
+
     function _checkWithdrawable(uint32 marketId, address recipient, uint256 amount) private view {
         if (recipient == address(0)) revert InvalidRecipient();
         // Rejected in-circuit too. Checked again because a zero withdrawal burns the note and
@@ -921,6 +1007,17 @@ contract ShieldedPool {
         // The CHANGE is deliberately unconstrained: it never becomes public, and forcing a
         // parimutuel payout onto a ladder would be impossible rather than inconvenient.
         if (!Denominations.isValid(amount)) revert NotADenomination(amount);
+
+        // A rung nobody else has ever used is an identifier, not a denomination. Being on the
+        // ladder is necessary and not sufficient: `10^9` is a legal rung, and if yours is the
+        // only 10^9 that ever entered the pool then withdrawing it names you regardless of
+        // what the proof hides.
+        //
+        // Gated per rung, unlike the bet gate above, because here the amount is PUBLIC and so
+        // the crowd that matters is the crowd at that size. At bet time no amount is published
+        // at all, which is why that gate counts every deposit instead.
+        uint256 atRung = depositsAtDenomination[amount];
+        if (atRung < minAnonymitySet) revert DenominationTooRare(amount, atRung, minAnonymitySet);
 
         // NO_MARKET is the unbet exit: collateral that was deposited and never staked. It has
         // no vault, no outcome and no settlement to wait for, so every check below is not

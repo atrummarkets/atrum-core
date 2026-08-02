@@ -159,12 +159,50 @@ async function main() {
   };
 
   // -------------------------------------------------------------------------
-  // 2. Sequencer grafts batch 1: the real deposit plus 63 fillers.
+  // 1b. A SECOND deposit, at a different rung, alongside the first
   // -------------------------------------------------------------------------
-  // Only the real commitment is submitted. The CONTRACT derives the remaining 63
-  // fillers, so the mirror must derive the identical values or the root diverges and
-  // every Merkle path built here fails on-chain.
-  const batch1 = [depositCommitment];
+  // Not decoration. Two gates depend on the pool having a crowd, and a recorded lifecycle
+  // that cannot satisfy them would only ever prove the gates are unreachable:
+  //
+  //   - `_requireAnonymitySet` refuses a bet until `minAnonymitySet` deposits exist. The
+  //     first bet below happens immediately after batch 1, so batch 1 must already carry
+  //     enough deposits for a pool configured at the test minimum.
+  //   - `_checkWithdrawable` refuses a withdrawal at a rung nobody else has used. The
+  //     settled withdrawal takes 10 units, so 10 has to be a rung the pool has seen more
+  //     than once -- this deposit and `depositEncrypted2` are those two.
+  //
+  // It is never spent. An unspent note is exactly what an anonymity set is made of.
+  const LADDER_UNITS = 10n;
+
+  const ladderNote = {
+    nullifier: randomField(),
+    secret: randomField(),
+    marketId: NO_MARKET,
+    outcome: OUTCOME_UNBET,
+    units: LADDER_UNITS,
+  };
+  const ladderCommitment = noteCommitment(ladderNote);
+
+  const ladderProof = await prove("deposit", {
+    commitment: ladderCommitment,
+    units: LADDER_UNITS,
+    nullifier: ladderNote.nullifier,
+    secret: ladderNote.secret,
+  }, { emitCalldata: false, record: false });
+
+  fixtures.depositLadder = {
+    ...ladderProof,
+    commitment: ladderCommitment.toString(),
+    units: LADDER_UNITS.toString(),
+  };
+
+  // -------------------------------------------------------------------------
+  // 2. Sequencer grafts batch 1: the two real deposits plus 62 fillers.
+  // -------------------------------------------------------------------------
+  // Only the real commitments are submitted. The CONTRACT derives the remaining fillers,
+  // so the mirror must derive the identical values or the root diverges and every Merkle
+  // path built here fails on-chain.
+  const batch1 = [depositCommitment, ladderCommitment];
   while (batch1.length < BATCH_SIZE) {
     batch1.push(derivedFiller(0, batch1.length));
   }
@@ -174,7 +212,7 @@ async function main() {
   const depositPath = tree.path(0);
 
   fixtures.batch1 = batch1.map((x) => x.toString());
-  fixtures.batch1Real = [depositCommitment.toString()];
+  fixtures.batch1Real = [depositCommitment.toString(), ladderCommitment.toString()];
   fixtures.derivedFiller_0_1 = derivedFiller(0, 1).toString();
   fixtures.derivedFiller_0_63 = derivedFiller(0, 63).toString();
   fixtures.rootAfterBatch1 = rootAfterBatch1.toString();

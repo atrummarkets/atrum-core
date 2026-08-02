@@ -63,6 +63,13 @@ contract ShieldedPoolTest is Test {
     uint32 constant ENCRYPTED_MARKET_ID = 8;
 
     uint256 constant DENOM = 1e6;
+
+    /// @dev The test minimum, not the production one. `ShieldedPool` documents 8 as the
+    ///      intended value; the recorded lifecycle contains four deposits in total, so a
+    ///      suite pinned to 8 could never reach a bet and would only ever prove the gate
+    ///      blocks everything. `AnonymitySetGate.t.sol` covers the gate at real values.
+    uint256 constant MIN_ANON_SET = 2;
+
     uint256 constant UNITS = 100;
 
     /// keccak256("atrum.shielded.empty") reduced into the BN254 scalar field. MUST
@@ -120,6 +127,7 @@ contract ShieldedPoolTest is Test {
             IActionVerifier8(address(betEncryptedVerifier)),
             IERC20(address(usdc)),
             DENOM,
+            MIN_ANON_SET,
             sequencer,
             admin
         );
@@ -166,9 +174,21 @@ contract ShieldedPoolTest is Test {
     // Lifecycle
     // -----------------------------------------------------------------------
 
+    /// @dev BOTH of batch 1's deposits, because `flushBatch` drains the queue in order and
+    ///      the fixture mirror grafted them together. The second is at a different rung and is
+    ///      never spent -- it exists so the pool satisfies its own anonymity-set gate, which
+    ///      refuses a bet into a crowd that does not exist. See `AnonymitySetGate.t.sol`.
     function _doDeposit() internal {
-        vm.prank(depositor);
+        vm.startPrank(depositor);
         pool.deposit(_pA("deposit"), _pB("deposit"), _pC("deposit"), _u(".deposit.commitment"), UNITS);
+        pool.deposit(
+            _pA("depositLadder"),
+            _pB("depositLadder"),
+            _pC("depositLadder"),
+            _u(".depositLadder.commitment"),
+            _u(".depositLadder.units")
+        );
+        vm.stopPrank();
     }
 
     /// @dev Queue the fixture's filler leaves, then graft the batch.
@@ -189,15 +209,21 @@ contract ShieldedPoolTest is Test {
 
         _doDeposit();
 
-        assertEq(before - usdc.balanceOf(depositor), UNITS * DENOM, "collateral not pulled");
-        assertEq(pool.queuedCount(), 1, "commitment not queued");
+        uint256 ladder = _u(".depositLadder.units");
+        assertEq(before - usdc.balanceOf(depositor), (UNITS + ladder) * DENOM, "collateral not pulled");
+        assertEq(pool.queuedCount(), 2, "both commitments queued");
+        assertEq(pool.totalDeposits(), 2, "deposits not counted toward the anonymity set");
+        assertEq(pool.depositsAtDenomination(UNITS), 1, "rung 100 miscounted");
+        assertEq(pool.depositsAtDenomination(ladder), 1, "rung 10 miscounted");
 
         // Collateral now sits in SHARED CUSTODY, not in a market's vault. A deposit names no
         // market, so there is no vault to split into and no complete set to mint -- that is
         // the whole point: the anonymity set is every unspent note in the system rather than
         // one market's depositors, and unbet collateral is never locked behind a resolution.
-        assertEq(usdc.balanceOf(address(pool)), UNITS * DENOM, "collateral not held by pool");
-        assertEq(pool.totalDepositedUnits(), UNITS, "deposit not counted toward the solvency bound");
+        assertEq(usdc.balanceOf(address(pool)), (UNITS + ladder) * DENOM, "collateral not held by pool");
+        assertEq(
+            pool.totalDepositedUnits(), UNITS + ladder, "deposits not counted toward the solvency bound"
+        );
 
         // The old structural invariant is gone with the deposit-time split, so assert its
         // absence rather than leaving it ambiguous: nothing is minted until a bet happens.
@@ -238,10 +264,11 @@ contract ShieldedPoolTest is Test {
         // Only REAL commitments occupy the queue now -- the deposit and the bet's
         // replacement note. Padding is derived inside `flushBatch` and never queued, so
         // the queue length is a true count of user actions rather than actions plus filler.
-        assertEq(pool.queuedCount(), 2, "position commitment not queued");
-        assertEq(pool.insertedCount(), 1, "only the deposit should be grafted so far");
-        // Slot 1, not 64: padding no longer occupies queue slots.
-        assertEq(pool.pendingCommitments(1), _u(".bet.newCommitment"), "queued commitment is not the new position");
+        assertEq(pool.queuedCount(), 3, "position commitment not queued");
+        assertEq(pool.insertedCount(), 2, "only batch 1's two deposits should be grafted so far");
+        // Slot 2, not 64: padding never occupies queue slots, so the position note sits
+        // directly behind batch 1's two deposits.
+        assertEq(pool.pendingCommitments(2), _u(".bet.newCommitment"), "queued commitment is not the new position");
     }
 
     function test_bet_rejectsReplay() public {
@@ -323,8 +350,11 @@ contract ShieldedPoolTest is Test {
     function test_flushBatch_rejectsLeavesNobodyQueued() public {
         _doDeposit();
 
-        uint256[] memory forged = new uint256[](1);
+        // Length must MATCH the queue, or the length check fires first and this would pass
+        // on `NotEnoughQueued` without ever testing the leaf comparison.
+        uint256[] memory forged = new uint256[](2);
         forged[0] = 12345;
+        forged[1] = 67890;
 
         vm.prank(sequencer);
         vm.expectRevert(ShieldedPool.InvalidProof.selector);
@@ -337,13 +367,15 @@ contract ShieldedPoolTest is Test {
     function test_flushBatch_graftsPartialBatchWithDerivedPadding() public {
         _doDeposit();
 
-        uint256[] memory short = new uint256[](1);
+        // Two real leaves out of a 64-slot subtree: the contract derives the other 62.
+        uint256[] memory short = new uint256[](2);
         short[0] = _u(".deposit.commitment");
+        short[1] = _u(".depositLadder.commitment");
 
         vm.prank(sequencer);
         pool.flushBatch(short);
 
-        assertEq(pool.insertedCount(), 1, "only the real commitment is consumed");
+        assertEq(pool.insertedCount(), 2, "only the real commitments are consumed");
         assertEq(tree.nextIndex(), 64, "a full aligned subtree must still be grafted");
     }
 
@@ -351,9 +383,10 @@ contract ShieldedPoolTest is Test {
     function test_flushBatch_rejectsMoreLeavesThanQueued() public {
         _doDeposit();
 
-        uint256[] memory tooMany = new uint256[](2);
+        uint256[] memory tooMany = new uint256[](3);
         tooMany[0] = _u(".deposit.commitment");
-        tooMany[1] = 999;
+        tooMany[1] = _u(".depositLadder.commitment");
+        tooMany[2] = 999;
 
         vm.prank(sequencer);
         vm.expectRevert(ShieldedPool.NotEnoughQueued.selector);
@@ -437,9 +470,10 @@ contract ShieldedPoolTest is Test {
     function test_flushBatch_fitsTransactionLimit() public {
         _doDeposit();
 
-        // Worst case for the contract: one real leaf, so it derives all 63 fillers.
-        uint256[] memory leaves = new uint256[](1);
+        // Near-worst case for the contract: two real leaves, so it derives the other 62.
+        uint256[] memory leaves = new uint256[](2);
         leaves[0] = pool.pendingCommitments(0);
+        leaves[1] = pool.pendingCommitments(1);
 
         vm.prank(sequencer);
         uint256 before = gasleft();
@@ -526,7 +560,7 @@ contract ShieldedPoolTest is Test {
         // the contract was never told one.
         assertEq(parimutuel.totalUnits(ENCRYPTED_MARKET_ID), 0, "an encrypted bet must not touch the public pool");
 
-        assertEq(pool.queuedCount(), 4, "position commitment not queued");
+        assertEq(pool.queuedCount(), 5, "position commitment not queued");
     }
 
     function test_betEncrypted_rejectsReplay() public {
