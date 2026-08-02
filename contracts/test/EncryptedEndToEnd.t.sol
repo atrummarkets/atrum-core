@@ -106,6 +106,8 @@ contract EncryptedEndToEndTest is Test {
             IDepositVerifier(address(dv)),
             IActionVerifier(address(bv)),
             IActionVerifier8(address(bev)),
+            IERC20(address(usdc)),
+            DENOM,
             sequencer,
             address(this)
         );
@@ -192,7 +194,7 @@ contract EncryptedEndToEndTest is Test {
         usdc.approve(address(pool), type(uint256).max);
 
         vm.prank(depositor);
-        pool.deposit(_pA("deposit"), _pB("deposit"), _pC("deposit"), _a(".deposit.commitment"), MARKET_ID, units);
+        pool.deposit(_pA("deposit"), _pB("deposit"), _pC("deposit"), _a(".deposit.commitment"), units);
         _flush(".batch1Real");
 
         pool.bet(
@@ -207,14 +209,7 @@ contract EncryptedEndToEndTest is Test {
         _flush(".batch2Real");
 
         vm.prank(depositor);
-        pool.deposit(
-            _pA("depositEncrypted"),
-            _pB("depositEncrypted"),
-            _pC("depositEncrypted"),
-            _a(".depositEncrypted.commitment"),
-            ENCRYPTED_MARKET_ID,
-            units
-        );
+        pool.deposit(_pA("depositEncrypted"), _pB("depositEncrypted"), _pC("depositEncrypted"), _a(".depositEncrypted.commitment"), units);
         _flush(".batch3Real");
         assertEq(tree.root(), _a(".rootAfterBatch3"), "root diverged from the mirror at batch 3");
 
@@ -231,14 +226,7 @@ contract EncryptedEndToEndTest is Test {
         );
 
         vm.prank(depositor);
-        pool.deposit(
-            _pA("depositEncrypted2"),
-            _pB("depositEncrypted2"),
-            _pC("depositEncrypted2"),
-            _a(".depositEncrypted2.commitment"),
-            ENCRYPTED_MARKET_ID,
-            _a(".depositEncrypted2.units")
-        );
+        pool.deposit(_pA("depositEncrypted2"), _pB("depositEncrypted2"), _pC("depositEncrypted2"), _a(".depositEncrypted2.commitment"), _a(".depositEncrypted2.units"));
         _flush(".batch4Real");
         assertEq(tree.root(), _a(".rootAfterBatch4"), "root diverged from the mirror at batch 4");
 

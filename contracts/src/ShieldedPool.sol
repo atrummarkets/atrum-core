@@ -9,12 +9,14 @@ import {ParimutuelPool} from "./ParimutuelPool.sol";
 import {ElGamalAccumulator} from "./ElGamalAccumulator.sol";
 import {Denominations} from "./Denominations.sol";
 
+/// @dev TWO public signals, not three. `marketId` left the deposit proof when collateral
+///      stopped being bound to a market -- see the shared-custody notice in ShieldedPool.
 interface IDepositVerifier {
     function verifyProof(
         uint256[2] calldata pA,
         uint256[2][2] calldata pB,
         uint256[2] calldata pC,
-        uint256[3] calldata pubSignals
+        uint256[2] calldata pubSignals
     ) external view returns (bool);
 }
 
@@ -95,10 +97,16 @@ interface IActionVerifier8 {
 ///      **1,816,031 -- 91% of the envelope** (MEASUREMENTS.md §1c). Local pricing does
 ///      not charge calldata, the intrinsic cost, or true cross-contract cold access, and
 ///      `deposit` crosses five contracts. Roughly **184,000 gas** of headroom remains,
-///      not the ~900,000 the local figures imply. Phase 2's accumulator has to fit in
-///      that; if it does not, optimise the action (move `Vault.split` out of `deposit`)
-///      rather than raising the envelope, which is publicly observable and shrinks the
-///      anonymity set of everything submitted before the change.
+///      not the ~900,000 the local figures imply. Anything added to an action has to fit
+///      in that; if it does not, optimise the action rather than raising the envelope,
+///      which is publicly observable and shrinks the anonymity set of everything
+///      submitted before the change.
+///
+///      One such optimisation has already happened, for a different reason: `deposit` no
+///      longer calls `Vault.split`, because a deposit no longer names a market. That was
+///      a privacy change, and the gas it returned is a side effect -- but it means the
+///      figure above is now an over-estimate for `deposit` and should be re-measured
+///      rather than assumed.
 ///
 ///      UNIFORM GAS LIMIT
 ///
@@ -118,6 +126,11 @@ contract ShieldedPool {
     uint8 internal constant OUTCOME_UNBET = 0;
     uint8 internal constant OUTCOME_YES = 1;
     uint8 internal constant OUTCOME_NO = 2;
+
+    /// @notice The marketId every UNBET note carries, since a deposit names no market.
+    ///         Reserved: `registerEncryptedMarket` refuses it, so it can never collide with
+    ///         a real market. `deposit.circom` and `bet_encrypted.circom` both pin to it.
+    uint32 internal constant NO_MARKET = 0;
 
     /// @notice Batches must be a power of two and aligned to their own size.
     uint256 public constant BATCH_SIZE = 64;
@@ -167,9 +180,72 @@ contract ShieldedPool {
 
     address public immutable admin;
 
+    // -----------------------------------------------------------------------
+    // SHARED COLLATERAL CUSTODY
+    //
+    // Collateral is held here, by the pool, and is NOT bound to a market. A deposit buys a
+    // note that can back a bet in ANY market, so the anonymity set is every unspent note in
+    // the system rather than one market's depositors. Under the old design a market with
+    // five depositors gave five notes of cover no matter how large the protocol grew.
+    //
+    // WHAT THIS GIVES UP, AND WHAT REPLACES IT
+    //
+    // The old design's solvency was STRUCTURAL: `Vault.split` was the only way to mint
+    // outcome tokens, it pulled collateral and minted both legs atomically, and so
+    // `collateralHeld == yesSupply*denom == noSupply*denom` could not be violated by any
+    // sequence of calls. Deposits named a market, so a market could never draw more than was
+    // committed to it.
+    //
+    // That invariant cannot survive a shared pool, because the amount a bet stakes is
+    // ENCRYPTED -- `betEncrypted` never learns `units`, by design -- so there is no moment at
+    // which the contract could split a known quantity into a known market.
+    //
+    // Solvency is therefore ARITHMETIC now, and it rests on four properties, each enforced
+    // rather than assumed:
+    //
+    //   1. A bet stakes the WHOLE note. `bet_encrypted.circom` binds `oldNote.units` and
+    //      `newNote.units` to the same signal, so stake == note size exactly.
+    //   2. Losing positions can never redeem (`LosingOrSettledPosition`), so a market pays
+    //      only its winners.
+    //   3. The payout division truncates DOWN in-circuit, so the winners of a market sum to
+    //      at most that market's total pool, never more.
+    //   4. The divisors are pinned to the settled totals, which are cryptographically bound
+    //      to the accumulated ciphertexts by the DLEQ proof plus the `C2 - D = [m]G` check.
+    //      A prover cannot invent a larger `totalPool`.
+    //
+    // Per market: units consumed as stakes == totalPool, units produced as payouts <=
+    // totalPool. Globally: sum of payouts <= sum of stakes <= sum of deposits.
+    //
+    // The counters below make that bound explicit and cheap to check rather than leaving it
+    // as a proof on paper. `_paidOutUnits` is additionally bounded per market wherever the
+    // market's true total is public (i.e. once settled), so a bug that over-pays one market
+    // is caught at that market rather than later, when the shared pool runs dry and the
+    // victim is whoever withdrew last.
+    // -----------------------------------------------------------------------
+
+    /// @notice The single collateral token. One token for the whole pool: two tokens would
+    ///         mean two pools and two anonymity sets, which is the thing this design exists
+    ///         to stop.
+    IERC20 public immutable collateral;
+
+    /// @notice Base units per denomination unit. Pool-level, not per-vault, for the same
+    ///         reason -- a note must be spendable in any market, so every market must price
+    ///         a unit identically.
+    uint256 public immutable denomination;
+
+    /// @notice Total units ever deposited, and ever paid out. The global solvency bound.
+    uint256 public totalDepositedUnits;
+    uint256 public totalWithdrawnUnits;
+
+    /// @notice Units paid out per market, bounded by that market's settled total.
+    mapping(uint32 => uint256) public paidOutUnits;
+
     /// @notice marketId -> Vault. Many markets share one tree, so they share one
     ///         anonymity set. One market per pool would make the tree an index of that
     ///         market's participants.
+    ///
+    /// @dev The Vault no longer custodies collateral. It remains the authority on RESOLUTION
+    ///      (`outcome`) and TIMING (`bettingCloseTime`), which are still per-market.
     mapping(uint32 => Vault) public marketVault;
 
     /// @notice Markets whose pool total lives in the accumulator, not in `parimutuel`.
@@ -265,6 +341,12 @@ contract ShieldedPool {
     error ZeroAmount();
     error WrongActionForMarket();
     error LegacyMarketsAreFrozen();
+    error InvalidCollateral();
+    error MarketIdReserved();
+    /// @dev The global bound: more units left than ever entered. Should be unreachable.
+    error PoolInsolvent();
+    /// @dev A settled market paid out more than its own published total.
+    error MarketOverdrawn(uint32 marketId);
 
     modifier onlySequencer() {
         if (msg.sender != sequencer) revert NotSequencer();
@@ -279,6 +361,8 @@ contract ShieldedPool {
         IDepositVerifier depositVerifier_,
         IActionVerifier betVerifier_,
         IActionVerifier8 betEncryptedVerifier_,
+        IERC20 collateral_,
+        uint256 denomination_,
         address sequencer_,
         address admin_
     ) {
@@ -286,6 +370,8 @@ contract ShieldedPool {
         // deploying against TreeNullifierSet would compile, deploy, and silently permit
         // unlimited double-spends -- see that contract's notice.
         if (!nullifiers_.enforcesOnChain()) revert NullifierSetCannotEnforce();
+        if (address(collateral_) == address(0)) revert InvalidCollateral();
+        if (denomination_ == 0) revert InvalidCollateral();
 
         tree = tree_;
         nullifiers = nullifiers_;
@@ -294,6 +380,8 @@ contract ShieldedPool {
         depositVerifier = depositVerifier_;
         betVerifier = betVerifier_;
         betEncryptedVerifier = betEncryptedVerifier_;
+        collateral = collateral_;
+        denomination = denomination_;
         sequencer = sequencer_;
         admin = admin_;
     }
@@ -336,6 +424,10 @@ contract ShieldedPool {
     ///      merely guarded.
     function registerEncryptedMarket(uint32 marketId, Vault vault) external {
         if (msg.sender != admin) revert NotAdmin();
+        // Market 0 is NO_MARKET, the sentinel every unbet note carries. Registering it would
+        // let a real market's positions be indistinguishable from unbet collateral in the
+        // commitment, which `bet_encrypted` relies on to refuse re-staking a position.
+        if (marketId == NO_MARKET) revert MarketIdReserved();
         if (address(marketVault[marketId]) != address(0)) revert MarketAlreadyRegistered();
 
         marketVault[marketId] = vault;
@@ -361,18 +453,29 @@ contract ShieldedPool {
 
     /// @notice Lock `units` denominations of collateral and publish a shielded note.
     ///
-    /// @dev The proof binds the commitment to the amount actually paid. Without it a
-    ///      user could pay for one unit and publish a commitment claiming a hundred.
+    /// @dev NO MARKET. The note this creates can back a bet in any market, or none. That is
+    ///      the whole point: the anonymity set for a bet becomes every unspent note in the
+    ///      system rather than the depositors of one market.
     ///
-    ///      The complete set minted by `Vault.split` is held by THIS contract, not the
-    ///      depositor. That is what lets redemption be decided by a proof later rather
-    ///      than by an address now.
+    ///      Three consequences worth stating, because each is a behaviour change:
+    ///
+    ///      1. There is no `bettingCloseTime` check here. A deposit is not a bet, so no
+    ///         market's deadline applies to it. Depositing is always open.
+    ///      2. Unbet collateral is no longer hostage to a market resolving. Under the old
+    ///         design, money deposited and never staked sat locked until whichever market it
+    ///         was bound to settled; now it was never bound, and `withdraw` can take it out
+    ///         at any time.
+    ///      3. Nothing is split into outcome tokens here, because there is no market to
+    ///         split into. See the shared-custody notice above for what secures the pool
+    ///         instead.
+    ///
+    ///      The proof still binds the commitment to the amount actually paid. Without it a
+    ///      user could pay for one unit and publish a commitment claiming a hundred.
     function deposit(
         uint256[2] calldata pA,
         uint256[2][2] calldata pB,
         uint256[2] calldata pC,
         uint256 commitment,
-        uint32 marketId,
         uint256 units
     ) external {
         // A deposit's amount is PUBLIC, so an amount nobody else uses is a name tag: the
@@ -382,23 +485,15 @@ contract ShieldedPool {
         // Subsumes the old `units == 0` check; zero is not on the ladder.
         if (!Denominations.isValid(units)) revert NotADenomination(units);
 
-        Vault vault = marketVault[marketId];
-        if (address(vault) == address(0)) revert MarketNotRegistered();
-        if (block.timestamp >= vault.bettingCloseTime()) revert BettingClosed();
-
-        if (!depositVerifier.verifyProof(pA, pB, pC, [commitment, uint256(marketId), units])) {
+        if (!depositVerifier.verifyProof(pA, pB, pC, [commitment, units])) {
             revert InvalidProof();
         }
 
-        uint256 amount = units * vault.denomination();
-        IERC20 collateral = vault.collateral();
-
-        if (!collateral.transferFrom(msg.sender, address(this), amount)) {
+        if (!collateral.transferFrom(msg.sender, address(this), units * denomination)) {
             revert TransferFailed();
         }
-        if (!collateral.approve(address(vault), amount)) revert TransferFailed();
-        vault.split(units);
 
+        totalDepositedUnits += units;
         _queue(commitment);
     }
 
@@ -771,24 +866,44 @@ contract ShieldedPool {
         emit Spent(nullifierHash);
         _queue(changeCommitment);
 
-        Vault vault = marketVault[marketId];
+        // Collateral leaves shared custody, not a per-market vault. There is no `redeem` or
+        // `merge` to call because no complete sets were ever minted -- see the shared-custody
+        // notice for why, and for the arithmetic that bounds this instead.
+        //
+        // Both bounds are checked BEFORE the transfer, so an over-payout reverts rather than
+        // succeeding and leaving the shortfall for whoever withdraws next.
+        _recordPayout(marketId, amount);
 
-        // A voided market has no winning side, so there is nothing to `redeem` against.
-        // Refunds come out through `merge`, which burns one YES and one NO per unit -- the
-        // only solvent route, because the vault holds exactly one unit of collateral per
-        // (YES, NO) pair. The pool always holds the two in equal measure, since every unit
-        // entered through `split`, so this can never fail for want of one side.
-        if (vault.outcome() == Vault.Outcome.Void) {
-            vault.merge(amount);
-        } else {
-            vault.redeem(amount);
-        }
-
-        if (!vault.collateral().transfer(recipient, amount * vault.denomination())) {
+        if (!collateral.transfer(recipient, amount * denomination)) {
             revert TransferFailed();
         }
 
         emit Withdrawn(recipient, marketId, amount);
+    }
+
+    /// @dev The solvency check that replaces the complete-set invariant.
+    ///
+    ///      GLOBAL: total paid out can never exceed total deposited. This alone is enough to
+    ///      keep the pool from being drained, but it only trips once the damage is done and
+    ///      the loser is whoever withdrew last.
+    ///
+    ///      PER MARKET: once a market is settled its true total is public, so a market can be
+    ///      held to it directly and a bug that over-pays one market is caught at that market.
+    ///      Deliberately skipped when the market is not settled: a Void market never
+    ///      publishes totals, and its refunds are bounded by the notes that exist, which the
+    ///      global check already covers. Asserting an unknown bound would just be a revert
+    ///      with a made-up number in it.
+    function _recordPayout(uint32 marketId, uint256 amount) private {
+        totalWithdrawnUnits += amount;
+        if (totalWithdrawnUnits > totalDepositedUnits) revert PoolInsolvent();
+
+        paidOutUnits[marketId] += amount;
+
+        if (address(encryptedTotals) != address(0) && encryptedTotals.settled(marketId)) {
+            uint256 marketTotal =
+                encryptedTotals.finalYesTotal(marketId) + encryptedTotals.finalNoTotal(marketId);
+            if (paidOutUnits[marketId] > marketTotal) revert MarketOverdrawn(marketId);
+        }
     }
 
     function _checkWithdrawable(uint32 marketId, address recipient, uint256 amount) private view {
@@ -806,6 +921,20 @@ contract ShieldedPool {
         // The CHANGE is deliberately unconstrained: it never becomes public, and forcing a
         // parimutuel payout onto a ladder would be impossible rather than inconvenient.
         if (!Denominations.isValid(amount)) revert NotADenomination(amount);
+
+        // NO_MARKET is the unbet exit: collateral that was deposited and never staked. It has
+        // no vault, no outcome and no settlement to wait for, so every check below is not
+        // merely skippable but meaningless -- there is no market to ask about.
+        //
+        // The proof is what makes this safe to short-circuit. `withdraw.circom` derives the
+        // spent note's outcome from `marketId`, so `marketId == 0` in `withdrawData` can ONLY
+        // have come from spending a note whose committed outcome was UNBET. A SETTLED note
+        // cannot be routed here, and an unbet note cannot be routed down the settled path.
+        //
+        // Solvency still holds: an unbet note is backed 1:1 by the deposit that created it,
+        // `amount + change == units` is proved in-circuit, and `_recordPayout` applies the
+        // global bound against `totalDepositedUnits` regardless of which path was taken.
+        if (marketId == NO_MARKET) return;
 
         Vault vault = marketVault[marketId];
         if (address(vault) == address(0)) revert MarketNotRegistered();

@@ -10,9 +10,10 @@ include "comparators.circom";
 ///
 /// The prover claims:
 ///
-///   "One of the leaves under root R is a SETTLED note of mine in market `marketId`. Here is
-///    its nullifier hash. Pay `amount` to `recipient`, and insert this new commitment holding
-///    the change."
+///   "One of the leaves under root R is a note of mine that is entitled to leave -- either a
+///    SETTLED payout in market `marketId`, or, when `marketId` is 0, collateral I deposited
+///    and never staked. Here is its nullifier hash. Pay `amount` to `recipient`, and insert
+///    this new commitment holding the change."
 ///
 /// WHAT IS AND IS NOT PRIVATE HERE, STATED HONESTLY
 ///
@@ -78,22 +79,38 @@ template Withdraw(levels, AMOUNT_BITS) {
 
     var SETTLED = 3;
 
-    // 1. Rebuild the note being spent. Its outcome is PINNED to SETTLED.
+    // 1. Rebuild the note being spent. TWO kinds of note can leave the pool, and which one
+    //    this is is DERIVED from `marketId` rather than chosen by the prover.
     //
-    //    This is the other half of the anti-mint pair. `redeem_private` always emits outcome
-    //    3 and refuses to spend one; this refuses to spend anything else. Together the only
-    //    path out of the pool is deposit -> bet -> redeem -> withdraw, with each step
-    //    consuming its input exactly once.
+    //      marketId != 0 -- a SETTLED payout note. This is the other half of the anti-mint
+    //        pair: `redeem_private` always emits outcome 3 and refuses to spend one; this
+    //        refuses to spend any other market-scoped outcome. Together the only path out
+    //        of a market is deposit -> bet -> redeem -> withdraw, each step consuming its
+    //        input exactly once.
     //
-    //    Pinning it as a constant rather than accepting it as a signal is deliberate: a
-    //    signal would need its own equality constraint, and forgetting that constraint is
-    //    precisely how an unbet note (outcome 0) becomes withdrawable without ever being
-    //    redeemed -- skipping the payout arithmetic entirely.
+    //      marketId == 0 (NO_MARKET) -- an UNBET note, straight back out of shared custody.
+    //        Under one shared pool a deposit names no market, so collateral that was never
+    //        staked has no market to wait for and no payout arithmetic to run: it is backed
+    //        1:1 and `amount + change === units` below is the whole of its correctness.
+    //        Without this path that collateral would be permanently stranded, since there
+    //        is no market whose settlement could ever release it.
+    //
+    //    `outcomeSig` is a pure function of `marketId`, not an input, so the prover cannot
+    //    mix the two: a SETTLED note can never be spent on the unbet path (it has a real
+    //    marketId), and an unbet note can never be spent on the settled path (it does not).
+    //    That is what keeps the anti-mint argument intact -- an unbet note still cannot
+    //    reach a market's pool arithmetic without first being bet and redeemed.
+    component marketZero = IsZero();
+    marketZero.in <== marketId;
+
+    signal outcomeSig;
+    outcomeSig <== SETTLED * (1 - marketZero.out);
+
     component oldNote = NoteCommitment();
     oldNote.nullifier <== nullifier;
     oldNote.secret <== secret;
     oldNote.marketId <== marketId;
-    oldNote.outcome <== SETTLED;
+    oldNote.outcome <== outcomeSig;
     oldNote.units <== units;
 
     // 2. Prove membership without revealing which leaf.
@@ -129,8 +146,10 @@ template Withdraw(levels, AMOUNT_BITS) {
     amountZero.in <== amount;
     amountZero.out === 0;
 
-    // 5. The change note: same market, still SETTLED so it remains withdrawable and remains
-    //    un-redeemable.
+    // 5. The change note: same market, same derived outcome. A settled note's change stays
+    //    SETTLED so it remains withdrawable and remains un-redeemable; an unbet note's change
+    //    stays UNBET so the remainder is still liquid AND still bettable, which is the point
+    //    of not binding a deposit to a market in the first place.
     //
     //    `change == 0` is allowed. The note is then worth nothing and is unspendable -- a
     //    later withdraw against it would need `amount > 0` with `amount + change == 0` --
@@ -140,7 +159,7 @@ template Withdraw(levels, AMOUNT_BITS) {
     changeNote.nullifier <== newNullifier;
     changeNote.secret <== newSecret;
     changeNote.marketId <== marketId;
-    changeNote.outcome <== SETTLED;
+    changeNote.outcome <== outcomeSig;
     changeNote.units <== change;
 
     changeCommitment === changeNote.commitment;

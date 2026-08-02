@@ -27,7 +27,6 @@ include "note.circom";
 template Deposit() {
     // ---- PUBLIC ----
     signal input commitment;
-    signal input marketId;
     signal input units;
 
     // ---- PRIVATE ----
@@ -37,10 +36,21 @@ template Deposit() {
     // A fresh deposit is unbet collateral, so outcome is fixed at 0 rather than being
     // an input. Accepting it as a signal would let a depositor mint a note already
     // committed to a winning side without ever placing a bet.
+    //
+    // `marketId` is fixed at NO_MARKET (0) for exactly the same reason, and it is why this
+    // circuit has two public signals rather than three. A deposit no longer names a market:
+    // the note it creates can back a bet in ANY market, which is what makes the anonymity
+    // set every unspent note in the system instead of one market's depositors.
+    //
+    // NoteCommitment still CARRIES marketId, and must -- a YES position in market 8 that
+    // could be redeemed against market 10 would be a theft, not a privacy feature. Unbet
+    // notes simply use the sentinel, and `bet_encrypted` requires the note it spends to
+    // carry it. Market 0 is unregisterable on-chain so the sentinel can never collide with
+    // a real market.
     component note = NoteCommitment();
     note.nullifier <== nullifier;
     note.secret <== secret;
-    note.marketId <== marketId;
+    note.marketId <== 0;
     note.outcome <== 0;
     note.units <== units;
 
@@ -54,4 +64,4 @@ template Deposit() {
     isZero.out === 0;
 }
 
-component main {public [commitment, marketId, units]} = Deposit();
+component main {public [commitment, units]} = Deposit();

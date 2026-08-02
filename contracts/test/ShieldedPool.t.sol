@@ -118,6 +118,8 @@ contract ShieldedPoolTest is Test {
             IDepositVerifier(address(depositVerifier)),
             IActionVerifier(address(betVerifier)),
             IActionVerifier8(address(betEncryptedVerifier)),
+            IERC20(address(usdc)),
+            DENOM,
             sequencer,
             admin
         );
@@ -166,7 +168,7 @@ contract ShieldedPoolTest is Test {
 
     function _doDeposit() internal {
         vm.prank(depositor);
-        pool.deposit(_pA("deposit"), _pB("deposit"), _pC("deposit"), _u(".deposit.commitment"), MARKET_ID, UNITS);
+        pool.deposit(_pA("deposit"), _pB("deposit"), _pC("deposit"), _u(".deposit.commitment"), UNITS);
     }
 
     /// @dev Queue the fixture's filler leaves, then graft the batch.
@@ -189,8 +191,18 @@ contract ShieldedPoolTest is Test {
 
         assertEq(before - usdc.balanceOf(depositor), UNITS * DENOM, "collateral not pulled");
         assertEq(pool.queuedCount(), 1, "commitment not queued");
-        assertEq(vault.yesBalance(address(pool)), UNITS, "pool holds no YES");
-        assertEq(vault.noBalance(address(pool)), UNITS, "pool holds no NO");
+
+        // Collateral now sits in SHARED CUSTODY, not in a market's vault. A deposit names no
+        // market, so there is no vault to split into and no complete set to mint -- that is
+        // the whole point: the anonymity set is every unspent note in the system rather than
+        // one market's depositors, and unbet collateral is never locked behind a resolution.
+        assertEq(usdc.balanceOf(address(pool)), UNITS * DENOM, "collateral not held by pool");
+        assertEq(pool.totalDepositedUnits(), UNITS, "deposit not counted toward the solvency bound");
+
+        // The old structural invariant is gone with the deposit-time split, so assert its
+        // absence rather than leaving it ambiguous: nothing is minted until a bet happens.
+        assertEq(vault.yesBalance(address(pool)), 0, "deposit must not mint a position");
+        assertEq(vault.noBalance(address(pool)), 0, "deposit must not mint a position");
     }
 
     /// @notice The check that makes every other test meaningful: the contract's root
@@ -381,7 +393,7 @@ contract ShieldedPoolTest is Test {
 
         vm.prank(depositor);
         uint256 before = gasleft();
-        pool.deposit(dpA, dpB, dpC, dCommitment, MARKET_ID, UNITS);
+        pool.deposit(dpA, dpB, dpC, dCommitment, UNITS);
         uint256 used = before - gasleft();
 
         console.log("=== REAL deposit() ===");
@@ -463,14 +475,7 @@ contract ShieldedPoolTest is Test {
         _flush(".batch2Real");
 
         vm.prank(depositor);
-        pool.deposit(
-            _pA("depositEncrypted"),
-            _pB("depositEncrypted"),
-            _pC("depositEncrypted"),
-            _u(".depositEncrypted.commitment"),
-            ENCRYPTED_MARKET_ID,
-            UNITS
-        );
+        pool.deposit(_pA("depositEncrypted"), _pB("depositEncrypted"), _pC("depositEncrypted"), _u(".depositEncrypted.commitment"), UNITS);
         _flush(".batch3Real");
 
         assertEq(tree.root(), _u(".rootAfterBatch3"), "root disagrees with the JS mirror at batch 3");

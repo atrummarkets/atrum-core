@@ -90,6 +90,8 @@ contract EncryptedParimutuelPoolTest is Test {
             IDepositVerifier(address(dv)),
             IActionVerifier(address(bv)),
             IActionVerifier8(address(bev)),
+            IERC20(address(usdc)),
+            DENOM,
             sequencer,
             address(this)
         );

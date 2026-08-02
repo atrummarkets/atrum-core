@@ -65,7 +65,7 @@ contract Exercise is Script {
 
         collateral.approve(address(pool), type(uint256).max);
 
-        pool.deposit(_pA("deposit"), _pB("deposit"), _pC("deposit"), _u(".deposit.commitment"), MARKET_ID, UNITS);
+        pool.deposit(_pA("deposit"), _pB("deposit"), _pC("deposit"), _u(".deposit.commitment"), UNITS);
         console.log("deposit done, queued:", pool.queuedCount());
 
         // Only the real commitment is submitted; the contract derives the remaining 63

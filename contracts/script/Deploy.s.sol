@@ -237,6 +237,8 @@ contract Deploy is Script {
             IDepositVerifier(d.depositVerifier),
             IActionVerifier(d.betVerifier),
             IActionVerifier8(d.betEncryptedVerifier),
+            IERC20(d.collateral),
+            DENOM,
             sequencer,
             deployer
         );

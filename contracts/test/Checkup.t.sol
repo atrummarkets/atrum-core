@@ -209,6 +209,8 @@ contract CheckupTest is Test {
             IDepositVerifier(address(dv)),
             IActionVerifier(address(bv)),
             IActionVerifier8(address(bev)),
+            IERC20(address(usdc)),
+            DENOM,
             sequencer,
             address(this)
         );
@@ -396,12 +398,16 @@ contract CheckupTest is Test {
         vm.startPrank(depositor);
         usdc.approve(address(pool), type(uint256).max);
         uint256 g = gasleft();
-        pool.deposit(pA, pB, pC, commitment, MARKET_ID, lifeUnits);
+        pool.deposit(pA, pB, pC, commitment, lifeUnits);
         gasDeposit = g - gasleft();
         vm.stopPrank();
 
         _eq(pool.queuedCount(), 1, "deposit -> commitment queued");
-        _eq(vault.yesBalance(address(pool)), lifeUnits, "deposit -> pool holds the complete set");
+        // Shared custody, not a per-market complete set: a deposit names no market, so there
+        // is nothing to split into and the collateral simply sits in the pool.
+        _eq(usdc.balanceOf(address(pool)), lifeUnits * DENOM, "deposit -> pool holds collateral");
+        _eq(pool.totalDepositedUnits(), lifeUnits, "deposit -> counted toward solvency bound");
+        _eq(vault.yesBalance(address(pool)), 0, "deposit -> mints nothing");
         _reportGas("deposit", gasDeposit);
     }
 

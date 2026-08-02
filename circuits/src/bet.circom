@@ -49,10 +49,15 @@ template Bet(levels) {
     // 1. Rebuild the note being spent. Outcome 0: only unbet collateral can be bet,
     //    which is what stops a position being re-bet onto the other side after news
     //    lands.
+    //
+    //    marketId is pinned to NO_MARKET (0) for a second, independent reason. A deposit
+    //    no longer names a market, so every unbet note carries the sentinel; requiring it
+    //    here is what stops a POSITION note being fed back in as unbet collateral. The
+    //    outcome pin alone does not cover that, because the prover controls both signals.
     component oldNote = NoteCommitment();
     oldNote.nullifier <== nullifier;
     oldNote.secret <== secret;
-    oldNote.marketId <== marketId;
+    oldNote.marketId <== 0;
     oldNote.outcome <== 0;
     oldNote.units <== units;
 

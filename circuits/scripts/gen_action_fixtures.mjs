@@ -42,6 +42,11 @@ const BUILD = new URL("../build/", import.meta.url);
 const OUT = new URL("../build/action-fixtures.json", import.meta.url);
 
 const BATCH_SIZE = 64;
+/// The marketId every UNBET note carries, since a deposit no longer names a market.
+/// `deposit.circom` and `bet_encrypted.circom` both pin to it, and `registerEncryptedMarket`
+/// refuses to register it, so it can never collide with a real market.
+const NO_MARKET = 0n;
+
 const MARKET_ID = 7n;
 
 /// A market registered on the Phase 2 path. Distinct from MARKET_ID because a market's
@@ -69,10 +74,16 @@ function assert(condition, message) {
  */
 const witnessInputs = {};
 
-async function prove(circuit, input, { emitCalldata = true } = {}) {
+async function prove(circuit, input, { emitCalldata = true, record = true } = {}) {
   // Last one wins where a circuit is proved more than once; they are the same shape, which
   // is all a client or a benchmark needs.
-  witnessInputs[circuit] = input;
+  //
+  // `record: false` opts a variant out. `withdraw` is proved twice with genuinely different
+  // shapes -- a settled payout and the unbet exit -- and the recorded example must stay the
+  // settled one, because that is what `atrum-client`'s bundle check validates field for
+  // field. Letting the unbet variant win would break that check with a witness that is
+  // perfectly valid.
+  if (record) witnessInputs[circuit] = input;
 
   const { proof, publicSignals } = await snarkjs.groth16.fullProve(
     input,
@@ -114,10 +125,14 @@ async function main() {
   // -------------------------------------------------------------------------
   // 1. DEPOSIT
   // -------------------------------------------------------------------------
+  // A deposit names NO MARKET. The note it creates carries the NO_MARKET sentinel and can
+  // back a bet in any market, which is what makes the anonymity set every unspent note in
+  // the system rather than one market's depositors. `deposit.circom` pins marketId to 0, so
+  // passing anything else here would build a witness the circuit refuses.
   const depositNote = {
     nullifier: randomField(),
     secret: randomField(),
-    marketId: MARKET_ID,
+    marketId: NO_MARKET,
     outcome: OUTCOME_UNBET,
     units: UNITS,
   };
@@ -125,7 +140,6 @@ async function main() {
 
   const depositProof = await prove("deposit", {
     commitment: depositCommitment,
-    marketId: MARKET_ID,
     units: UNITS,
     nullifier: depositNote.nullifier,
     secret: depositNote.secret,
@@ -136,8 +150,7 @@ async function main() {
     "deposit signal[0] is not the commitment -- public signal ORDER differs from " +
       "what ShieldedPool.deposit assumes",
   );
-  assert(BigInt(depositProof.publicSignals[1]) === MARKET_ID, "deposit signal[1] != marketId");
-  assert(BigInt(depositProof.publicSignals[2]) === UNITS, "deposit signal[2] != units");
+  assert(BigInt(depositProof.publicSignals[1]) === UNITS, "deposit signal[1] != units");
 
   fixtures.deposit = {
     ...depositProof,
@@ -286,15 +299,20 @@ async function main() {
   // A separate market with its own batch, deliberately appended after the Phase 1
   // lifecycle rather than woven into it. A market's pool total lives EITHER in
   // `ParimutuelPool` (plaintext) or in `ElGamalAccumulator` (ciphertext), never both,
-  // so the encrypted bet cannot reuse market 7 -- and `marketId` is bound inside the
-  // note commitment, so it cannot reuse market 7's note either.
+  // so the encrypted bet cannot reuse market 7's POSITION note -- `marketId` is bound
+  // inside a position note's commitment.
+  //
+  // The DEPOSIT below is market-agnostic, exactly like the Phase 1 one: a second unbet
+  // note carrying NO_MARKET. It exists only because the Phase 1 deposit note was already
+  // spent, not because market 8 needs its own deposit. Under one shared pool, either
+  // note could have funded either bet -- which is the entire point of the change.
   //
   // Appending also keeps `rootAfterBatch1`/`rootAfterBatch2` byte-identical, so every
   // existing Phase 1 test keeps replaying against the roots it was written for.
   const encDepositNote = {
     nullifier: randomField(),
     secret: randomField(),
-    marketId: ENCRYPTED_MARKET_ID,
+    marketId: NO_MARKET,
     outcome: OUTCOME_UNBET,
     units: UNITS,
   };
@@ -302,7 +320,6 @@ async function main() {
 
   const encDepositProof = await prove("deposit", {
     commitment: encDepositCommitment,
-    marketId: ENCRYPTED_MARKET_ID,
     units: UNITS,
     nullifier: encDepositNote.nullifier,
     secret: encDepositNote.secret,
@@ -431,7 +448,7 @@ async function main() {
   const encDepositNote2 = {
     nullifier: randomField(),
     secret: randomField(),
-    marketId: ENCRYPTED_MARKET_ID,
+    marketId: NO_MARKET,
     outcome: OUTCOME_UNBET,
     units: SECOND_UNITS,
   };
@@ -439,7 +456,6 @@ async function main() {
 
   const encDepositProof2 = await prove("deposit", {
     commitment: encDepositCommitment2,
-    marketId: ENCRYPTED_MARKET_ID,
     units: SECOND_UNITS,
     nullifier: encDepositNote2.nullifier,
     secret: encDepositNote2.secret,
@@ -726,6 +742,111 @@ async function main() {
   };
 
   // -------------------------------------------------------------------------
+  // 6f. THE UNBET EXIT -- deposit, never bet, walk out.
+  // -------------------------------------------------------------------------
+  // The path that only exists because a deposit stopped naming a market. Previously an
+  // unbet note was locked until ITS market resolved, so capital committed for a bet that
+  // was never placed sat frozen for the life of a market it never entered. With no market
+  // binding there is nothing to wait for.
+  //
+  // `withdraw.circom` derives the spent note's outcome from `marketId`, so this fixture is
+  // also the negative test for that derivation: a proof carrying `marketId == 0` can only
+  // have come from an UNBET note, and the contract short-circuits every market check on
+  // that basis. If the derivation were ever loosened into a free signal, this fixture and
+  // `fixtures.withdraw` would both still verify while a SETTLED note became spendable on
+  // the unbet path.
+  const unbetNote = {
+    nullifier: randomField(),
+    secret: randomField(),
+    marketId: NO_MARKET,
+    outcome: OUTCOME_UNBET,
+    units: UNITS,
+  };
+  const unbetCommitment = noteCommitment(unbetNote);
+
+  const unbetDepositProof = await prove("deposit", {
+    commitment: unbetCommitment,
+    units: UNITS,
+    nullifier: unbetNote.nullifier,
+    secret: unbetNote.secret,
+  }, { emitCalldata: false });
+
+  fixtures.depositUnbetExit = {
+    ...unbetDepositProof,
+    commitment: unbetCommitment.toString(),
+    units: UNITS.toString(),
+  };
+
+  // Batch 7 carries TWO real leaves in QUEUE ORDER: the change note the settled withdrawal
+  // above produced, then this deposit. `flushBatch` consumes the queue strictly in order, so
+  // omitting the change note here would make the mirror and the chain disagree the moment a
+  // test runs the settled withdrawal and this one in the same timeline -- which is exactly
+  // what the invariant suite does. The whole fixture file is one timeline; it has to stay one.
+  const unbetBatch = [wdChangeCommitment, unbetCommitment];
+  while (unbetBatch.length < BATCH_SIZE) {
+    unbetBatch.push(derivedFiller(6 * BATCH_SIZE, unbetBatch.length));
+  }
+  for (const leaf of unbetBatch) tree.insert(leaf);
+
+  const unbetRoot = tree.root();
+  const unbetPath = tree.path(6 * BATCH_SIZE + 1);
+
+  fixtures.batch7 = unbetBatch.map((x) => x.toString());
+  fixtures.batch7Real = [wdChangeCommitment.toString(), unbetCommitment.toString()];
+  fixtures.rootAfterBatch7 = unbetRoot.toString();
+
+  // Partial on purpose. The change note stays UNBET rather than SETTLED, so the remainder
+  // is not just still withdrawable -- it is still BETTABLE, in any market. That is the
+  // shared-pool property stated as a fixture rather than as prose.
+  const unbetAmount = 10n;
+  const unbetChange = UNITS - unbetAmount;
+
+  const unbetChangeNote = {
+    nullifier: randomField(),
+    secret: randomField(),
+    marketId: NO_MARKET,
+    outcome: OUTCOME_UNBET,
+    units: unbetChange,
+  };
+  const unbetChangeCommitment = noteCommitment(unbetChangeNote);
+  const unbetNullifierHash = nullifierHash(unbetNote.nullifier);
+
+  // marketId is 0, so withdrawData is just recipient and amount -- the whole top field is
+  // the sentinel, which is exactly what the contract branches on.
+  const unbetWithdrawData =
+    NO_MARKET * (1n << 200n) + wdRecipient * (1n << 40n) + unbetAmount;
+
+  const unbetWithdrawProof = await prove("withdraw", {
+    root: unbetRoot,
+    nullifierHash: unbetNullifierHash,
+    changeCommitment: unbetChangeCommitment,
+    withdrawData: unbetWithdrawData,
+    nullifier: unbetNote.nullifier,
+    secret: unbetNote.secret,
+    newNullifier: unbetChangeNote.nullifier,
+    newSecret: unbetChangeNote.secret,
+    marketId: NO_MARKET,
+    units: UNITS,
+    recipient: wdRecipient,
+    amount: unbetAmount,
+    change: unbetChange,
+    pathElements: unbetPath.pathElements,
+    pathIndices: unbetPath.pathIndices,
+  }, { emitCalldata: false, record: false });
+
+  fixtures.withdrawUnbet = {
+    ...unbetWithdrawProof,
+    root: unbetRoot.toString(),
+    nullifierHash: unbetNullifierHash.toString(),
+    changeCommitment: unbetChangeCommitment.toString(),
+    withdrawData: unbetWithdrawData.toString(),
+    amount: unbetAmount.toString(),
+    recipient: "0x" + wdRecipient.toString(16),
+    privateNoteValue: UNITS.toString(),
+    privateChange: unbetChange.toString(),
+  };
+
+  // -------------------------------------------------------------------------
   // 7. Negative fixture: a bet proof for a note that was never deposited.
   //    The contract must reject it, and the only thing standing in the way is the
   //    Merkle constraint -- worth having a real counterexample rather than trusting it.
@@ -733,7 +854,7 @@ async function main() {
   const forgedNote = {
     nullifier: randomField(),
     secret: randomField(),
-    marketId: MARKET_ID,
+    marketId: NO_MARKET,
     outcome: OUTCOME_UNBET,
     units: UNITS,
   };

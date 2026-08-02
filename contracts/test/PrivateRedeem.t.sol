@@ -117,6 +117,8 @@ contract PrivateRedeemTest is Test {
             IDepositVerifier(address(dv)),
             IActionVerifier(address(bv)),
             IActionVerifier8(address(bev)),
+            IERC20(address(usdc)),
+            DENOM,
             sequencer,
             address(this)
         );
@@ -196,7 +198,7 @@ contract PrivateRedeemTest is Test {
         usdc.approve(address(pool), type(uint256).max);
 
         vm.prank(depositor);
-        pool.deposit(_pA("deposit"), _pB("deposit"), _pC("deposit"), _a(".deposit.commitment"), MARKET_ID, units);
+        pool.deposit(_pA("deposit"), _pB("deposit"), _pC("deposit"), _a(".deposit.commitment"), units);
         _flush(".batch1Real");
 
         pool.bet(
@@ -211,14 +213,7 @@ contract PrivateRedeemTest is Test {
         _flush(".batch2Real");
 
         vm.prank(depositor);
-        pool.deposit(
-            _pA("depositEncrypted"),
-            _pB("depositEncrypted"),
-            _pC("depositEncrypted"),
-            _a(".depositEncrypted.commitment"),
-            ENCRYPTED_MARKET_ID,
-            units
-        );
+        pool.deposit(_pA("depositEncrypted"), _pB("depositEncrypted"), _pC("depositEncrypted"), _a(".depositEncrypted.commitment"), units);
         _flush(".batch3Real");
 
         pool.betEncrypted(
@@ -233,14 +228,7 @@ contract PrivateRedeemTest is Test {
         );
 
         vm.prank(depositor);
-        pool.deposit(
-            _pA("depositEncrypted2"),
-            _pB("depositEncrypted2"),
-            _pC("depositEncrypted2"),
-            _a(".depositEncrypted2.commitment"),
-            ENCRYPTED_MARKET_ID,
-            _a(".depositEncrypted2.units")
-        );
+        pool.deposit(_pA("depositEncrypted2"), _pB("depositEncrypted2"), _pC("depositEncrypted2"), _a(".depositEncrypted2.commitment"), _a(".depositEncrypted2.units"));
         _flush(".batch4Real");
 
         pool.betEncrypted(
@@ -554,28 +542,172 @@ contract PrivateRedeemTest is Test {
     }
 
     /// @notice The pool must actually hold the collateral it pays out.
-    /// @dev Solvency by construction: every deposit created a complete set, and settled notes
-    ///      sum to exactly the deposited total (staked payouts plus unbet refunds). If that
-    ///      ever stopped holding, this is where it would surface -- `Vault.redeem` would
-    ///      revert on an insufficient position rather than silently underpay.
+    /// @dev Solvency used to be STRUCTURAL: every deposit minted a complete set through
+    ///      `Vault.split`, so an over-payout could not physically happen -- `Vault.redeem`
+    ///      would revert on an insufficient position.
+    ///
+    ///      One shared pool deletes that. A deposit names no market, so nothing is minted and
+    ///      there is no complete set to be short of. What replaces it is ARITHMETIC, enforced
+    ///      in `_recordPayout`: cumulative withdrawals may never exceed cumulative deposits,
+    ///      and once a market settles its own payouts may never exceed its published total.
+    ///
+    ///      So this test now asserts against the pool's own USDC balance and its two
+    ///      counters, which is where the guarantee actually lives.
     function test_withdraw_poolRemainsSolvent() public {
         _runToWithdrawable();
 
-        uint256 heldBefore = encryptedVault.yesBalance(address(pool));
+        uint256 heldBefore = usdc.balanceOf(address(pool));
         uint256 amount = _a(".withdraw.amount");
-        assertGe(heldBefore, amount, "pool does not hold enough winning tokens to pay");
+        uint256 withdrawnBefore = pool.totalWithdrawnUnits();
+
+        assertGe(heldBefore, amount * DENOM, "pool does not hold enough collateral to pay");
 
         _withdraw();
 
         assertEq(
-            encryptedVault.yesBalance(address(pool)),
-            heldBefore - amount,
-            "vault position did not decrease by the amount paid"
+            usdc.balanceOf(address(pool)),
+            heldBefore - amount * DENOM,
+            "pool balance did not decrease by exactly the amount paid"
         );
         assertEq(
-            usdc.balanceOf(address(encryptedVault)),
-            encryptedVault.collateralHeld(),
-            "vault accounting drifted from its actual balance"
+            pool.totalWithdrawnUnits(),
+            withdrawnBefore + amount,
+            "payout not recorded against the global solvency bound"
+        );
+        assertLe(
+            pool.totalWithdrawnUnits(),
+            pool.totalDepositedUnits(),
+            "pool paid out more than was ever deposited"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // THE UNBET EXIT -- deposit, never bet, walk out
+    // -----------------------------------------------------------------------
+
+    /// @dev Deposit the unbet-exit fixture's note and graft it. Deliberately runs the FULL
+    ///      preceding lifecycle first: the fixture's Merkle path was built against a mirror
+    ///      that already contained batches 1-6, so grafting it in isolation would produce a
+    ///      different root and the proof would fail for a reason that has nothing to do with
+    ///      the path under test.
+    ///
+    ///      The settled withdraw MUST run here. Batch 7 carries its change note as the first
+    ///      real leaf, because `flushBatch` drains the queue in order and the generator built
+    ///      the mirror the same way. Skipping it would leave the queue one leaf short and the
+    ///      grafted root would not be the one this fixture's Merkle path was built against.
+    function _runToUnbetWithdrawable() internal {
+        _runToWithdrawable();
+        _withdraw();
+
+        uint256 units = _a(".depositUnbetExit.units");
+        vm.prank(depositor);
+        pool.deposit(
+            _pA("depositUnbetExit"),
+            _pB("depositUnbetExit"),
+            _pC("depositUnbetExit"),
+            _a(".depositUnbetExit.commitment"),
+            units
+        );
+        _flush(".batch7Real");
+        assertEq(tree.root(), _a(".rootAfterBatch7"), "root diverged from the mirror at batch 7");
+    }
+
+    function _withdrawUnbet() internal {
+        pool.withdraw(
+            _pA("withdrawUnbet"),
+            _pB("withdrawUnbet"),
+            _pC("withdrawUnbet"),
+            _a(".withdrawUnbet.root"),
+            _a(".withdrawUnbet.nullifierHash"),
+            _a(".withdrawUnbet.changeCommitment"),
+            _a(".withdrawUnbet.withdrawData")
+        );
+    }
+
+    /// @notice Collateral that was never staked leaves without waiting for any market.
+    /// @dev The capability that only exists because a deposit stopped naming a market. Under
+    ///      the old design this note would have been locked until ITS market resolved --
+    ///      capital committed for a bet that was never placed. Here there is no market to
+    ///      wait for, and none of the markets in this test are settled at the moment it is
+    ///      withdrawn.
+    function test_withdrawUnbet_exitsWithoutAnyMarket() public {
+        _runToUnbetWithdrawable();
+
+        address recipient = address(uint160(_a(".withdrawUnbet.recipient")));
+        uint256 amount = _a(".withdrawUnbet.amount");
+        uint256 before = usdc.balanceOf(recipient);
+        uint256 queuedBefore = pool.queuedCount();
+
+        _withdrawUnbet();
+
+        assertEq(usdc.balanceOf(recipient) - before, amount * DENOM, "recipient was not paid");
+        assertEq(pool.queuedCount(), queuedBefore + 1, "change note was not queued");
+        assertTrue(nullifiers.isSpent(_a(".withdrawUnbet.nullifierHash")), "note was not burned");
+
+        // The change stays UNBET, so it is not merely still withdrawable -- it is still
+        // BETTABLE, in any market. That is the shared-pool property, asserted rather than
+        // asserted-about: conservation is proved in-circuit, so the on-chain evidence is that
+        // the exit paid the public leg and returned a live note.
+        assertEq(
+            _a(".withdrawUnbet.amount") + _a(".withdrawUnbet.privateChange"),
+            _a(".withdrawUnbet.privateNoteValue"),
+            "conservation broken across the unbet exit"
+        );
+    }
+
+    function test_withdrawUnbet_isOneShot() public {
+        _runToUnbetWithdrawable();
+        _withdrawUnbet();
+
+        vm.expectRevert(ShieldedPool.NullifierAlreadySpent.selector);
+        _withdrawUnbet();
+    }
+
+    /// @notice The unbet exit is still bounded by the global solvency check.
+    /// @dev NO_MARKET skips every per-market check, so the global bound is the ONLY thing
+    ///      standing between this path and a drain. Assert it is actually being applied.
+    function test_withdrawUnbet_countsAgainstGlobalSolvencyBound() public {
+        _runToUnbetWithdrawable();
+
+        uint256 withdrawnBefore = pool.totalWithdrawnUnits();
+        uint256 amount = _a(".withdrawUnbet.amount");
+
+        _withdrawUnbet();
+
+        assertEq(
+            pool.totalWithdrawnUnits(),
+            withdrawnBefore + amount,
+            "unbet exit bypassed the global solvency counter"
+        );
+        assertLe(
+            pool.totalWithdrawnUnits(),
+            pool.totalDepositedUnits(),
+            "pool paid out more than was ever deposited"
+        );
+    }
+
+    /// @notice A SETTLED note cannot be re-routed onto the unbet path.
+    /// @dev The soundness question the whole NO_MARKET branch turns on. `withdraw.circom`
+    ///      DERIVES the spent note's outcome from `marketId`, so rewriting marketId to 0 in
+    ///      the public signal describes a different note than the one the prover holds -- the
+    ///      proof must simply stop verifying. If this ever passes, the derivation has been
+    ///      loosened into a free signal and settled notes can skip every market check.
+    function test_withdraw_settledNoteCannotClaimNoMarket() public {
+        _runToWithdrawable();
+
+        uint256 data = _a(".withdraw.withdrawData");
+        // Clear marketId (bits 200+), leaving recipient and amount untouched.
+        uint256 rewritten = data & ((uint256(1) << 200) - 1);
+
+        vm.expectRevert(ShieldedPool.InvalidProof.selector);
+        pool.withdraw(
+            _pA("withdraw"),
+            _pB("withdraw"),
+            _pC("withdraw"),
+            _a(".withdraw.root"),
+            _a(".withdraw.nullifierHash"),
+            _a(".withdraw.changeCommitment"),
+            rewritten
         );
     }
 
@@ -684,6 +816,8 @@ contract PrivateRedeemTest is Test {
             IDepositVerifier(address(dv)),
             IActionVerifier(address(bv)),
             IActionVerifier8(address(bev)),
+            IERC20(address(usdc)),
+            DENOM,
             sequencer,
             address(this)
         );

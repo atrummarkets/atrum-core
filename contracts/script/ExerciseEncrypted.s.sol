@@ -120,7 +120,7 @@ contract ExerciseEncrypted is Script {
 
         if (phase == 1) {
             // --- Phase 1 lifecycle, to walk the tree to batch 3 ---
-            pool.deposit(_pA("deposit"), _pB("deposit"), _pC("deposit"), _u(".deposit.commitment"), MARKET_ID, UNITS);
+            pool.deposit(_pA("deposit"), _pB("deposit"), _pC("deposit"), _u(".deposit.commitment"), UNITS);
             _flushOne(pool, _u(".deposit.commitment"));
 
             pool.bet(
@@ -135,14 +135,7 @@ contract ExerciseEncrypted is Script {
             _flushOne(pool, _u(".bet.newCommitment"));
 
             // --- Phase 2: deposit into the ENCRYPTED market ---
-            pool.deposit(
-                _pA("depositEncrypted"),
-                _pB("depositEncrypted"),
-                _pC("depositEncrypted"),
-                _u(".depositEncrypted.commitment"),
-                ENCRYPTED_MARKET_ID,
-                UNITS
-            );
+            pool.deposit(_pA("depositEncrypted"), _pB("depositEncrypted"), _pC("depositEncrypted"), _u(".depositEncrypted.commitment"), UNITS);
             _flushOne(pool, _u(".depositEncrypted.commitment"));
 
             // --- THE ENCRYPTED BET ---
@@ -153,14 +146,7 @@ contract ExerciseEncrypted is Script {
             // --- A SECOND ENCRYPTED BET, different stake ---
             // One bet shows the ciphertext is accepted. Two show the property the whole
             // design rests on: the contract TOTALS them without decrypting either.
-            pool.deposit(
-                _pA("depositEncrypted2"),
-                _pB("depositEncrypted2"),
-                _pC("depositEncrypted2"),
-                _u(".depositEncrypted2.commitment"),
-                ENCRYPTED_MARKET_ID,
-                _u(".depositEncrypted2.units")
-            );
+            pool.deposit(_pA("depositEncrypted2"), _pB("depositEncrypted2"), _pC("depositEncrypted2"), _u(".depositEncrypted2.commitment"), _u(".depositEncrypted2.units"));
 
             // Two leaves this time, in queue order: the first encrypted bet's position note
             // is still pending, and the queue is consumed strictly in order.
