@@ -10,10 +10,14 @@
  */
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { pathToFileURL } from "node:url";
 import { Sequencer } from "./sequencer.ts";
 import { initHasher } from "./tree.ts";
 import { chainFor } from "./chains.ts";
-import type { Address } from "viem";
+import { Relayer, RelayError, parseRelayRequest } from "./relay.ts";
+import type { RelayableAction, RelayRequest, RelayResult } from "./relay.ts";
+import { createPublicClient, http } from "viem";
+import type { Address, PublicClient } from "viem";
 
 /** The subset of Sequencer the HTTP surface touches, so the handler can be tested alone. */
 interface PathSource {
@@ -23,6 +27,69 @@ interface PathSource {
     root: bigint;
     path: { pathElements: bigint[]; pathIndices: bigint[] };
   };
+}
+
+/** The subset of Relayer the HTTP surface touches -- same reason as PathSource. */
+interface RelaySink {
+  submit(action: RelayableAction, args: readonly unknown[]): Promise<RelayResult>;
+}
+
+/**
+ * Read a JSON body, with a hard size cap.
+ *
+ * There was no body parsing in this service before /relay -- every route was a GET. The cap
+ * matters because this is the first endpoint an untrusted client can push bytes into, and an
+ * unbounded read is a trivial memory exhaustion.
+ */
+const MAX_BODY_BYTES = 64 * 1024;
+
+function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new RelayError(`body exceeds ${MAX_BODY_BYTES} bytes`, 413));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      } catch {
+        reject(new RelayError("body is not valid JSON"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+async function handleRelay(
+  req: IncomingMessage,
+  res: ServerResponse,
+  json: Record<string, string>,
+  relayer: RelaySink,
+): Promise<void> {
+  try {
+    const body = (await readJsonBody(req)) as RelayRequest;
+    const { action, args } = parseRelayRequest(body);
+    const result = await relayer.submit(action, args);
+
+    res.writeHead(200, json).end(
+      JSON.stringify({
+        hash: result.hash,
+        blockNumber: Number(result.blockNumber),
+        gasUsed: result.gasUsed.toString(),
+        relayer: result.relayer,
+      }),
+    );
+  } catch (error) {
+    const status = error instanceof RelayError ? error.status : 500;
+    res.writeHead(status, json).end(JSON.stringify({ error: (error as Error).message }));
+  }
 }
 
 /**
@@ -42,7 +109,11 @@ interface PathSource {
  * Authorization or Content-Type header the browser sends an OPTIONS preflight, which is why
  * OPTIONS is answered explicitly below rather than falling through to 404.
  */
-export function createPathHandler(sequencer: PathSource, corsOrigin = "*") {
+export function createPathHandler(
+  sequencer: PathSource,
+  corsOrigin = "*",
+  relayer?: RelaySink,
+) {
   const json = {
     "content-type": "application/json",
     "access-control-allow-origin": corsOrigin,
@@ -55,11 +126,29 @@ export function createPathHandler(sequencer: PathSource, corsOrigin = "*") {
       res
         .writeHead(204, {
           ...json,
-          "access-control-allow-methods": "GET, OPTIONS",
+          // POST is here for /relay, which unlike every other route sends a body and
+          // therefore a content-type header -- which is what triggers preflight at all.
+          "access-control-allow-methods": "GET, POST, OPTIONS",
           "access-control-allow-headers": "content-type",
           "access-control-max-age": "86400",
         })
         .end();
+      return;
+    }
+
+    // Submit a user's action from a relayer account, so their own address never appears on
+    // chain. Only proof-gated actions are accepted; see relay.ts for why `deposit` is not one
+    // and why a relayer cannot redirect a withdrawal it submits.
+    if (url.pathname === "/relay") {
+      if (req.method !== "POST") {
+        res.writeHead(405, json).end('{"error":"POST only"}');
+        return;
+      }
+      if (!relayer) {
+        res.writeHead(503, json).end('{"error":"relaying is not enabled on this sequencer"}');
+        return;
+      }
+      handleRelay(req, res, json, relayer);
       return;
     }
 
@@ -135,7 +224,35 @@ async function main(): Promise<void> {
 
   const port = Number(process.env.PORT ?? 8080);
 
-  createServer(createPathHandler(sequencer, process.env.CORS_ORIGIN ?? "*")).listen(
+  // Relaying is opt-in: it spends the operator's own gas on users' behalf, so it must never
+  // switch itself on by existing. RELAY_MNEMONIC is deliberately separate from
+  // RELAYER_MNEMONIC -- the sequencer's batching account is authorised by `onlySequencer` and
+  // should not also be the address every user action traces to.
+  const relayMnemonic = process.env.RELAY_MNEMONIC;
+  let relayer: Relayer | undefined;
+
+  if (relayMnemonic) {
+    const publicClient = createPublicClient({
+      chain,
+      transport: http(process.env.RPC_URL ?? chain.rpcUrls.default.http[0]!),
+    }) as PublicClient;
+
+    relayer = new Relayer({
+      rpcUrl: process.env.RPC_URL ?? chain.rpcUrls.default.http[0]!,
+      chain,
+      poolAddress: required("POOL_ADDRESS") as Address,
+      mnemonic: relayMnemonic,
+      publicClient,
+      relayerCount: Number(process.env.RELAY_ACCOUNTS ?? 5),
+    });
+    console.log(`relaying enabled, ${relayer.addresses.length} account(s): ${relayer.addresses.join(", ")}`);
+    console.log("fund these, or every relayed action fails with insufficient balance");
+  } else {
+    console.log("relaying DISABLED (set RELAY_MNEMONIC to enable) -- users submit their own txs,");
+    console.log("which means their address is on chain next to every action they take");
+  }
+
+  createServer(createPathHandler(sequencer, process.env.CORS_ORIGIN ?? "*", relayer)).listen(
     port,
     () => console.log(`merkle path endpoint on :${port}`),
   );
@@ -161,7 +278,16 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+// Only boot when run as a program, not when imported.
+//
+// `createPathHandler` is exported so it can be tested without RPC, a mnemonic, or a chain --
+// but an unguarded `main()` at module scope defeated that: importing the handler started the
+// whole service, which then failed on missing env vars and called process.exit(1) from inside
+// the test runner. The tests still passed, so it surfaced only as an "unhandled rejection"
+// nobody had to act on.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
