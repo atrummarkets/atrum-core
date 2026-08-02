@@ -159,4 +159,35 @@ describe("RelayerPool", () => {
     for (let i = 1; i < RELAYER_COUNT; i++) pool.next();
     expect(pool.next().address).toBe(first);
   });
+
+  // The batching account is pinned by the pool's IMMUTABLE `sequencer`, which is set from the
+  // deployer's raw PRIVATE_KEY. Nothing can change it afterwards, so if this pool could only
+  // take a mnemonic the sequencer service could never sign as the address it must sign as.
+  describe("raw private key", () => {
+    // anvil account 0 -- the same key the mnemonic above derives at index 0.
+    const KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+    const ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+
+    it("yields exactly one account, matching the key", () => {
+      const pool = new RelayerPool(KEY, 1);
+      expect(pool.size).toBe(1);
+      expect(pool.addresses).toEqual([ADDRESS]);
+    });
+
+    it("keeps returning that one account", () => {
+      const pool = new RelayerPool(KEY, 1);
+      expect(pool.next().address).toBe(ADDRESS);
+      expect(pool.next().address).toBe(ADDRESS);
+    });
+
+    it("refuses to pretend a single key can rotate", () => {
+      // Silently collapsing to one account would look like rotation was configured and
+      // working, while every batch went out from the same address.
+      expect(() => new RelayerPool(KEY, 5)).toThrow(/exactly one account/);
+    });
+
+    it("still treats a mnemonic as a mnemonic", () => {
+      expect(new RelayerPool(MNEMONIC, 1).addresses).toEqual([ADDRESS]);
+    });
+  });
 });
