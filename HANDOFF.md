@@ -153,17 +153,29 @@ deploy time to the first address `RELAYER_MNEMONIC` derives
 (`mnemonicToAccount(mnemonic, { addressIndex: 0 })`), so at least that account's turns
 succeed. A real deployment needs an actual decision here before rotation past index 0 matters.
 
-### [MEASURED] betEncrypted, live, client-built ElGamal ciphertext
+### [MEASURED] The full lifecycle, live, every step through the real client
 
-Bet placed through the real `atrum-client` UI (headless-driven, real funded wallet, real
-worker, nothing canned): note created and grafted, committee public key read from
-`EncryptedParimutuelPool` on chain, ElGamal-encrypted client-side, proved, submitted.
-**Landed: block 50197594, 1,493,512 gas.** First real evidence the client's encryption path
-— not just its commitment derivation — agrees with what the chain expects.
+Not a subset — deposit through withdraw, six real transactions on Monad testnet, each built
+by the actual `atrum-client` code (headless-driven, real funded wallet, real Web Worker,
+nothing canned), separated by the real one-hour `resolutionStartTime` gap `Vault.sol`
+enforces even under `EXERCISE_MODE=1` — not worked around, since it is a stated safety
+invariant, not a knob:
 
-Resolve, settle, redeem, withdraw are next, gated on the real one-hour
-`resolutionStartTime` gap `Vault.sol` enforces even under `EXERCISE_MODE=1` — not worked
-around, since it is a stated safety invariant, not a knob.
+| step | block | notes |
+|---|---|---|
+| deposit | 50197417 | 100 units, market 8 |
+| `betEncrypted` YES | 50197594 | 1,493,512 gas; ElGamal-encrypted client-side against the on-chain committee key |
+| `vault.resolve(YES)` | 50210340 | via `resolve-and-settle.mjs` |
+| `publishFinalTotals` | 50210396 | decrypted YES=100, NO=0 — matches the single bet exactly |
+| `redeemPrivate` | 50210468 | 1,285,617 gas |
+| `withdraw` | 50210822 | 1,372,435 gas; `Withdrawn(0x7975e591…, marketId=8, amount=100)` confirmed from the raw event log, not just receipt status |
+
+**The relayer-rotation gap above is not hypothetical — it happened mid-run.** The third
+sequencer batch (grafting the redeem's payout note) landed on relayer index 1 by round-robin
+and reverted with `NotSequencer()`, exactly as §"GOTCHA" above predicts once rotation moves
+past index 0. The new receipt-status check caught it immediately and named the relayer;
+restarting the sequencer reset the cursor to 0 and the next batch succeeded. Left as-is
+rather than patched further — it is evidence for the open question above, not a new one.
 
 ---
 
