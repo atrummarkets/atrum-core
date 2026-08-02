@@ -60,6 +60,29 @@ const RELAY_ABI = parseAbi([
   "function betEncrypted(uint256[2] pA, uint256[2][2] pB, uint256[2] pC, uint256 root, uint256 nullifierHash, uint256 newCommitment, uint256 betMeta, uint256[4] ciphertext)",
   "function redeemPrivate(uint256[2] pA, uint256[2][2] pB, uint256[2] pC, uint256 root, uint256 nullifierHash, uint256 newCommitment, uint256 redeemMeta)",
   "function withdraw(uint256[2] pA, uint256[2][2] pB, uint256[2] pC, uint256 root, uint256 nullifierHash, uint256 changeCommitment, uint256 withdrawData)",
+
+  // Errors, so a simulated revert decodes to a name and its arguments instead of to a hex
+  // blob. Without these the relayer's whole reason for simulating -- telling the user WHY --
+  // produces "reverted with 0x177e59a6", which is no better than the receipt it replaced.
+  //
+  // Only the ones a well-formed request can actually hit are listed. `InvalidProof` and the
+  // structural errors mean the client built something wrong, and their names are enough.
+  "error AnonymitySetTooSmall(uint256 have, uint256 need)",
+  "error DenominationTooRare(uint256 amount, uint256 have, uint256 need)",
+  "error RootTooRecent(uint256 age, uint256 need)",
+  "error UnknownRoot()",
+  "error NullifierAlreadySpent()",
+  "error BettingClosed()",
+  "error NotSettled2()",
+  "error NotResolved()",
+  "error MarketNotRegistered()",
+  "error WrongActionForMarket()",
+  "error NotADenomination(uint256 amount)",
+  "error LosingOrSettledPosition()",
+  "error TotalsMismatch()",
+  "error PoolInsolvent()",
+  "error MarketOverdrawn(uint32 marketId)",
+  "error InvalidProof()",
 ]);
 
 /** How many arguments each action takes after the three proof points. */
@@ -316,6 +339,30 @@ export class Relayer {
       chain: this.config.chain,
       transport: http(this.config.rpcUrl),
     });
+
+    // SIMULATE FIRST. Monad bills the DECLARED gas limit, not the gas used, and every action
+    // declares the same 2,500,000 for anti-fingerprinting -- so a policy revert costs the
+    // relayer a full-price transaction and tells the user only "reverted on chain". An
+    // `eth_call` costs nothing, fails with the actual custom error, and leaks nothing the
+    // relayer cannot already see.
+    //
+    // This is NOT `eth_estimateGas`, which is banned on user actions: a per-action estimate
+    // is a public fingerprint of which private action was taken. Simulation returns no gas
+    // figure and changes no declared limit.
+    try {
+      await this.config.publicClient.simulateContract({
+        address: this.config.poolAddress,
+        abi: RELAY_ABI,
+        functionName: action as never,
+        args: args as never,
+        account,
+      });
+    } catch (e) {
+      const reason = e instanceof Error ? (e.message.split("\n")[0] ?? e.message) : String(e);
+      // 400, not 502: the request is the problem, and a client that retries it unchanged will
+      // fail identically. A 5xx would invite exactly that retry.
+      throw new RelayError(`${action} would revert: ${reason}`, 400);
+    }
 
     const hash = await wallet.writeContract({
       address: this.config.poolAddress,
