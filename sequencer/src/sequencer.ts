@@ -89,7 +89,13 @@ export class Sequencer {
 
   constructor(config: SequencerConfig) {
     this.config = config;
-    this.relayers = new RelayerPool(config.mnemonic);
+    // count=1: ShieldedPool.onlySequencer authorizes exactly ONE fixed address (set at
+    // deploy via the SEQUENCER env var), not a set. RelayerPool's default of 10 rotates the
+    // SIGNER past that one authorized address, so every batch after the first reverts with
+    // NotSequencer() -- found live, mid-run, on 2026-08-02 (HANDOFF.md "0-ter"). Pinned to 1
+    // until the contract accepts more than one sequencer address; raising this back to 10
+    // without that change reintroduces the same failure.
+    this.relayers = new RelayerPool(config.mnemonic, 1);
     this.publicClient = createPublicClient({
       chain: config.chain,
       transport: http(config.rpcUrl),
