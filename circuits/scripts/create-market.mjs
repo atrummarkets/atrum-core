@@ -130,12 +130,19 @@ async function main() {
   const thresholdExpo = -8;
   const threshold = BigInt(Math.round(Number(thresholdArg) * 10 ** -thresholdExpo));
 
-  const spec = [priceId, threshold, thresholdExpo, targetTime, 3600, direction === "above"];
+  // Overridable for fast demo markets -- the default (3600s window, ~61min resolution margin)
+  // is what HANDOFF.md calls out as always adding its own margin "regardless of MIN_RESOLUTION_GAP",
+  // which is fine for a real week-long market and much too slow for a live demo. windowSeconds
+  // is a pure liveness bound (see PythResolver.sol's Spec doc), so shrinking it is safe.
+  const windowSeconds = Number(process.env.WINDOW_SECONDS ?? 3600);
+  const resolutionMargin = Number(process.env.RESOLUTION_MARGIN_SECONDS ?? 3660);
+
+  const spec = [priceId, threshold, thresholdExpo, targetTime, windowSeconds, direction === "above"];
   const question = `Will ${symbol} be ${direction} $${Number(thresholdArg).toLocaleString()} at ${new Date(targetTime * 1000).toISOString()}?`;
   console.log(question);
 
   const resolutionSpecHash = await resolver.hashSpec(spec);
-  const resolutionStartTime = targetTime + 3600 + 60; // after the window closes, plus margin
+  const resolutionStartTime = targetTime + resolutionMargin;
 
   if (targetTime < bettingCloseTime) die("target time must be after betting closes");
 
@@ -188,6 +195,17 @@ async function main() {
     bettingCloseTime,
     resolutionStartTime,
     createdAt: now,
+    // Everything below is extra -- atrum-markets' registry.ts ignores unknown fields, but
+    // resolve-oracle-market.mjs needs the EXACT spec used to build resolutionSpecHash to ever
+    // resolve this market later. Losing these means the market can never be resolved.
+    spec: {
+      priceId,
+      threshold: threshold.toString(),
+      thresholdExpo,
+      targetTime,
+      windowSeconds,
+      greaterThan: direction === "above",
+    },
   });
   registry.markets.sort((a, b) => a.id - b.id);
   writeFileSync(REGISTRY_PATH, `${JSON.stringify(registry, null, 2)}\n`);

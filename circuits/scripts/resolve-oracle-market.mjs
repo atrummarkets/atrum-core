@@ -12,7 +12,7 @@
  * Usage:
  *   PRIVATE_KEY=0x... node scripts/resolve-oracle-market.mjs <marketId>
  *
- * Reads the market's spec from atrum-client/markets.json (written by create-market.mjs),
+ * Reads the market's spec from atrum-markets/markets.json (written by create-market.mjs),
  * fetches the FIRST Pyth update at or after the committed targetTime from Hermes, and
  * submits it. Permissionless on the contract -- any funded key can call this, per
  * PythResolver.sol's own design.
@@ -24,7 +24,8 @@ import { ethers } from "ethers";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RPC = process.env.RPC_URL ?? "https://testnet-rpc.monad.xyz";
-const REGISTRY_PATH = join(HERE, "..", "..", "..", "atrum-client", "markets.json");
+const REGISTRY_PATH =
+  process.env.REGISTRY ?? join(HERE, "..", "..", "..", "atrum-markets", "markets.json");
 
 // `spec` is ABI-encoded bytes on the wire (built with defaultAbiCoder below), not a raw
 // tuple argument -- `PythResolver.resolve` decodes it internally.
@@ -49,7 +50,8 @@ async function main() {
   const registry = JSON.parse(readFileSync(REGISTRY_PATH, "utf8"));
   const market = registry.markets.find((m) => m.id === marketId);
   if (!market) die(`market ${marketId} not found in ${REGISTRY_PATH}`);
-  if (market.type !== "oracle") die(`market ${marketId} is type '${market.type}', not oracle`);
+  if (market.resolverType !== "oracle") die(`market ${marketId} is resolverType '${market.resolverType}', not oracle`);
+  if (!market.spec) die(`market ${marketId} has no recorded spec -- can't resolve it`);
 
   const now = Math.floor(Date.now() / 1000);
   if (now < market.spec.targetTime) {
@@ -71,7 +73,7 @@ async function main() {
   const price = Number(parsed.price.price) * 10 ** parsed.price.expo;
   console.log(
     `got: $${price.toFixed(2)} at ${new Date(parsed.price.publish_time * 1000).toISOString()} `
-    + `(claimed: ${market.direction} $${market.threshold})`,
+    + `(claimed: ${market.spec.greaterThan ? "above" : "below"} $${Number(market.spec.threshold) * 10 ** market.spec.thresholdExpo})`,
   );
 
   const oracleData = [`0x${body.binary.data[0]}`];
