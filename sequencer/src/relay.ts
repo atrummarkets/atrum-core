@@ -81,7 +81,6 @@ const RELAY_ABI = parseAbi([
   "error LosingOrSettledPosition()",
   "error TotalsMismatch()",
   "error PoolInsolvent()",
-  "error MarketOverdrawn(uint32 marketId)",
   "error InvalidProof()",
 ]);
 
@@ -202,6 +201,12 @@ export interface RelayerConfig {
    * half a user cannot verify. It is worth having anyway, and worth being honest about.
    */
   releaseIntervalMs?: number;
+  /**
+   * Native MON sent to a `withdraw`'s recipient right after the withdrawal itself lands,
+   * unset/0 disables it. See the top-up notice above `Relayer.send`: a flat operator subsidy,
+   * fixed for every top-up, same anti-fingerprinting reasoning as `ACTION_GAS_LIMIT`.
+   */
+  topupAmountWei?: bigint;
 }
 
 /** A submission waiting for its release window. */
@@ -385,6 +390,34 @@ export class Relayer {
       );
     }
 
+    // AUTOMATIC GAS TOP-UP -- an unrequestable companion to a successful relayed withdraw.
+    //
+    // A standalone `/topup` endpoint that funds any address on request has no natural rate
+    // limit: anyone can call it, drain the relayer, and "requested a top-up" becomes its own
+    // timing signal disconnected from any real action. Riding it on a withdraw that has ALREADY
+    // simulated, submitted and confirmed means a top-up can never be requested without a real,
+    // valid withdraw proof behind it, and it costs nothing beyond what the withdrawal itself
+    // already reveals -- same account, same batch, no new distinguishable `tx.from` pattern, no
+    // new public endpoint.
+    //
+    // A top-up failure does not fail the withdrawal: the collateral has already moved, and
+    // there is no accounting to unwind here -- see the config doc on `topupAmountWei`.
+    if (action === "withdraw" && this.config.topupAmountWei && this.config.topupAmountWei > 0n) {
+      const withdrawData = args[6] as bigint;
+      const recipient = recipientFromWithdrawData(withdrawData);
+      try {
+        await wallet.sendTransaction({
+          account,
+          chain: this.config.chain,
+          to: recipient,
+          value: this.config.topupAmountWei,
+        });
+      } catch (e) {
+        const reason = e instanceof Error ? e.message : String(e);
+        console.error(`gas top-up to ${recipient} failed, withdraw itself still succeeded: ${reason}`);
+      }
+    }
+
     return {
       hash,
       blockNumber: receipt.blockNumber,
@@ -392,6 +425,21 @@ export class Relayer {
       relayer: account.address,
     };
   }
+}
+
+/**
+ * Pull `recipient` back out of a `withdraw`'s public `withdrawData` signal.
+ *
+ * Mirrors `ShieldedPool._unpackWithdrawData` exactly: `withdrawData = unbetExit * 2^200 +
+ * recipient * 2^40 + amount`, so `recipient` is the 160 bits starting at bit 40 -- unaffected
+ * by `unbetExit` narrowing from the full `marketId` to one bit, since that only changed what
+ * lives above bit 200. Reading it from the already-verified proof's own public signal, rather
+ * than trusting a client-supplied field, means a malformed value here can only be this file
+ * drifting from the contract's packing -- not something an untrusted caller controls.
+ */
+function recipientFromWithdrawData(withdrawData: bigint): Address {
+  const raw = (withdrawData >> 40n) & ((1n << 160n) - 1n);
+  return `0x${raw.toString(16).padStart(40, "0")}` as Address;
 }
 
 /**

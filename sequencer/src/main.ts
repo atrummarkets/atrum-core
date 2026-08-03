@@ -245,9 +245,18 @@ async function main(): Promise<void> {
       publicClient,
       relayerCount: Number(process.env.RELAY_ACCOUNTS ?? 5),
       releaseIntervalMs: Number(process.env.RELAY_RELEASE_INTERVAL_MS ?? 0),
+      topupAmountWei: process.env.RELAY_TOPUP_AMOUNT_WEI ? BigInt(process.env.RELAY_TOPUP_AMOUNT_WEI) : undefined,
     });
     console.log(`relaying enabled, ${relayer.addresses.length} account(s): ${relayer.addresses.join(", ")}`);
     console.log("fund these, or every relayed action fails with insufficient balance");
+    if (process.env.RELAY_TOPUP_AMOUNT_WEI) {
+      console.log(
+        `gas top-up enabled: every relayed withdraw also sends ${process.env.RELAY_TOPUP_AMOUNT_WEI} `
+          + "wei MON to its recipient, same account and batch",
+      );
+    } else {
+      console.log("RELAY_TOPUP_AMOUNT_WEI unset -- withdraw recipients get no gas top-up");
+    }
     if (relayer.releaseIntervalMs > 0) {
       console.log(
         `holding submissions ${relayer.releaseIntervalMs}ms and releasing them shuffled, so ` +
