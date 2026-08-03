@@ -11,9 +11,16 @@ Written to be read by someone who has not seen the earlier conversation.
 
 **There is a front end now, and it is wired to a real deployment.** `atrum-markets/` (sibling
 repo, Next.js) lists seven markets, connects a real wallet, and drives the full lifecycle on
-Monad testnet. Read §0-quater below before touching it: the architecture has one deliberate,
-disclosed trust compromise (proving runs server-side, so the server sees note secrets) and
-that is the single biggest thing standing between this and something users should trust.
+Monad testnet. Read §0-quater below before touching it. Two things there outrank everything
+else:
+
+1. **The trust compromise** — proving runs server-side, so the server sees every note secret.
+   That is what stands between this and something users should *trust*.
+2. **There is no first run** — every screen explains itself and nothing explains the
+   sequence, so a newcomer meets five unfamiliar steps one failure at a time and, on current
+   evidence, gets stuck waiting for their first deposit to graft and never places a bet. That
+   is what stands between this and something users can *use*. It is the cheapest of the two
+   to fix and blocks nothing.
 
 **Live deployment: pool `0xcF2b211397dC7499331F227DdDec9436FE9Da379`**, `minAnonymitySet = 2`
 (a DEMO value; production is 8), `minRootAge = 0`. Everything before it this session is
@@ -286,6 +293,54 @@ list or omit a market, never misstate one.
   0.5 MON per action. Three relay accounts and the sequencer's batching account all need
   watching; the batching account already ran dry once mid-session and every `flushBatch`
   reverted until it was topped up.
+
+### THE BIGGEST PRODUCT GAP: there is no first run
+
+**Every screen explains itself. Nothing explains the sequence — and the sequence is the
+unfamiliar part.** A user arriving from Polymarket expects "deposit, click YES, done". What
+this protocol actually requires is five steps, three of which have no analogue in any
+prediction market they have used, and the app currently reveals them one failure at a time.
+
+The mechanism is not the problem. The mechanism is good and the copy is honest about it. The
+problem is that a newcomer meets it in the wrong order, and every one of the steps below is a
+place where a reasonable person concludes the site is broken rather than that it is working
+as designed:
+
+| what happens | what a first-timer thinks |
+|---|---|
+| deposit needs testnet MON for gas AND mock USDC | discovers the MON requirement only when their wallet errors. Two faucets, one of them external, neither mentioned until you fail. |
+| after depositing you cannot bet yet | "it didn't work." The note is queued until a batch grafts. No countdown, no "come back in ~30s" — the bet ticket just says there is nothing to stake. |
+| a bet spends the WHOLE note | "where is the amount field?" You cannot bet 30 of a 100-unit note. |
+| the pool refuses a bet below `minAnonymitySet` | reads as an error, not as the product's central promise being kept. |
+| redeem does not pay you | "I redeemed and got nothing." It mints a shielded note; `withdraw` is a separate action, deliberately, and the two-step split is the whole of what protects the winner. |
+| withdraw only accepts powers of ten, and only rungs others have used | "why is my amount rejected?" |
+
+**A guided first run is the fix, and the shape of it matters.** Atrum's voice is to explain
+the mechanism and refuse rather than hide — a wizard must SEQUENCE that, not skin over it.
+The waiting step is the sharpest test: the graft delay is not latency to apologise for, it is
+the anonymity set being assembled, and the boundary page already says so in prose. A first run
+should make that legible while it happens rather than leaving the user staring at a disabled
+button.
+
+Concretely, what it needs to be:
+
+1. **State the prerequisites up front**, before the first click, with both faucets reachable
+   from one place: testnet MON for gas (external, `faucet.monad.xyz`) and the mock collateral
+   (in-app, `mint` is permissionless).
+2. **Make the queue a step, not a dead end.** After a deposit, show the note's position and
+   the live `queuedCount`/`batchCount` already exposed by `/api/atrum/config`, and say plainly
+   that the wait IS the privacy. Then move the user on automatically when it grafts.
+3. **Teach notes-not-balances once**, at the moment it first bites — most naturally when the
+   bet ticket asks which note to spend, rather than as an up-front wall of text.
+4. **Pre-announce the two-step exit** before the user redeems, so "no money moved" is the
+   expected outcome and not a scare.
+5. **Be skippable and resumable**, keyed to real state rather than a local flag: someone who
+   already holds a grafted note should never be walked through depositing again. Every input
+   it needs is already served by the existing endpoints.
+
+None of this is protocol work and none of it is blocked. It is the difference between a thing
+that demos well to someone who already knows how it works and a thing a stranger on a waitlist
+can use — and on current evidence, that stranger gets stuck at step 2 and never places a bet.
 
 ### Addresses for this deployment
 
@@ -1272,7 +1327,7 @@ most **~28 proofs**. Batch size is bounded by the transaction limit, not the blo
 ### 4.1 Engineering remaining
 
 **The protocol is done.** Everything that could have failed for cryptographic or gas reasons
-now works on a real chain. What remains is three different KINDS of work:
+now works on a real chain. What remains is four different KINDS of work:
 
 1. ~~**Frontend** — nothing exists.~~ **PARTLY DONE, see §0-quater.** `atrum-markets/` lists
    markets, connects a wallet, and drives the full lifecycle on testnet. What is NOT done is
@@ -1280,10 +1335,15 @@ now works on a real chain. What remains is three different KINDS of work:
    sees every note secret.** Moving it into the browser — IndexedDB-cached artefacts,
    lazy-loaded per action, a Web Worker, all as §0-bis measured — is the remaining work, and
    it is what separates a demo from something a user should trust with money.
-2. **Fixture lifecycle rewrite** — mechanical. Deletes `registerMarket`, `bet()`,
+2. **Onboarding — a guided first run.** Separate from the above and much cheaper: the app
+   explains every screen and never the sequence, so a stranger hits five unfamiliar steps one
+   failure at a time. §0-quater lists them and what the wizard has to do. Nothing blocks it,
+   it needs no new endpoints, and until it exists the waitlist converts badly no matter how
+   good the protocol is.
+3. **Fixture lifecycle rewrite** — mechanical. Deletes `registerMarket`, `bet()`,
    `ParimutuelPool` and the plaintext verifiers, leaving one market type and one exit. Blocks
    nothing, but every line of dead code is audit surface you pay for.
-3. **Ceremony + threshold committee** — coordination, not code. Neither moves without other
+4. **Ceremony + threshold committee** — coordination, not code. Neither moves without other
    people and calendar time, so **start them early**; they are the only items with an
    irreducible wait.
 
