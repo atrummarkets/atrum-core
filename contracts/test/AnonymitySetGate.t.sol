@@ -289,8 +289,9 @@ contract AnonymitySetGateTest is Test {
         uint256 rareAmount = 1000;
         assertEq(pool.depositsAtDenomination(rareAmount), 0, "precondition: rung unused");
 
-        // withdrawData = marketId * 2^200 + recipient * 2^40 + amount
-        uint256 data = (uint256(9) << 200) | (uint256(uint160(depositor)) << 40) | rareAmount;
+        // withdrawData = unbetExit * 2^200 + recipient * 2^40 + amount. The rung check fires
+        // before the unbetExit branch either way, so its value is irrelevant here.
+        uint256 data = (uint256(uint160(depositor)) << 40) | rareAmount;
 
         // Hoisted. `vm.expectRevert` applies to the very NEXT call, and a `tree.root()` read
         // inside the argument list is that call -- it returns cleanly and the assertion fails
@@ -312,17 +313,24 @@ contract AnonymitySetGateTest is Test {
     }
 
     /// @notice A rung with enough history gets past this gate and on to the next check.
-    /// @dev Reverting with `MarketNotRegistered` is the pass condition: it is the check that
-    ///      immediately follows, so reaching it proves the rung gate let go.
+    /// @dev No longer a SPECIFIC next check to name. `_checkWithdrawable`'s settled branch
+    ///      (`unbetExit == false`) has nothing left to run -- dropping `marketId` from
+    ///      `withdrawData` left nothing to look `marketVault`/`encryptedMarket`/`settled` up
+    ///      against -- so a call that clears the rung gate falls through to proof verification.
+    ///      This pool never binds a withdraw verifier (this suite only exercises the
+    ///      anonymity/rung gates, not the encrypted withdraw path), so that call reverts too,
+    ///      just not with a decodable reason. A bare `expectRevert` is what is left to assert:
+    ///      the rung gate did not stop this call, whatever stopped it after.
     function test_withdraw_rungGateOpensAtK() public {
         for (uint256 i = 0; i < K; i++) _deposit(".deposit", 100);
         assertEq(pool.depositsAtDenomination(100), K, "precondition: rung is popular enough");
 
-        uint256 data = (uint256(9) << 200) | (uint256(uint160(depositor)) << 40) | uint256(100);
+        // unbetExit = 0: takes the settled-market branch, which no longer checks anything.
+        uint256 data = (uint256(uint160(depositor)) << 40) | uint256(100);
 
         uint256 knownRoot = tree.root();
 
-        vm.expectRevert(ShieldedPool.MarketNotRegistered.selector);
+        vm.expectRevert();
         pool.withdraw(
             [uint256(1), uint256(2)],
             [[uint256(3), uint256(4)], [uint256(5), uint256(6)]],

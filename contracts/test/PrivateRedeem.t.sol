@@ -714,18 +714,21 @@ contract PrivateRedeemTest is Test {
         );
     }
 
-    /// @notice A SETTLED note cannot be re-routed onto the unbet path.
-    /// @dev The soundness question the whole NO_MARKET branch turns on. `withdraw.circom`
-    ///      DERIVES the spent note's outcome from `marketId`, so rewriting marketId to 0 in
-    ///      the public signal describes a different note than the one the prover holds -- the
-    ///      proof must simply stop verifying. If this ever passes, the derivation has been
-    ///      loosened into a free signal and settled notes can skip every market check.
+    /// @notice A SETTLED note cannot have its exit re-flagged as an unbet exit.
+    /// @dev The soundness question the whole `unbetExit` bit turns on, now that it -- not the
+    ///      full `marketId` -- is what `_checkWithdrawable` branches on. `withdraw.circom`
+    ///      DERIVES it from the note's real, private `marketId` via `marketZero.out`, so
+    ///      flipping the public bit post-hoc describes a different note than the one the
+    ///      prover holds -- the proof must simply stop verifying. If this ever passes, the
+    ///      derivation has been loosened into a free signal and settled notes can skip every
+    ///      market check by claiming to be unbet exits.
     function test_withdraw_settledNoteCannotClaimNoMarket() public {
         _runToWithdrawable();
 
         uint256 data = _a(".withdraw.withdrawData");
-        // Clear marketId (bits 200+), leaving recipient and amount untouched.
-        uint256 rewritten = data & ((uint256(1) << 200) - 1);
+        // A settled note's unbetExit bit (200) is 0. Flip it to 1, leaving recipient and
+        // amount untouched.
+        uint256 rewritten = data | (uint256(1) << 200);
 
         vm.expectRevert(ShieldedPool.InvalidProof.selector);
         pool.withdraw(
@@ -736,26 +739,6 @@ contract PrivateRedeemTest is Test {
             _a(".withdraw.nullifierHash"),
             _a(".withdraw.changeCommitment"),
             rewritten
-        );
-    }
-
-    /// @notice A plaintext market cannot be withdrawn from.
-    function test_withdraw_rejectsPlaintextMarket() public {
-        _runToWithdrawable();
-
-        uint256 data = _a(".withdraw.withdrawData");
-        // Rewrite marketId (bits 200+) from 8 to 7.
-        uint256 plaintext = (data & ((uint256(1) << 200) - 1)) | (uint256(MARKET_ID) << 200);
-
-        vm.expectRevert(ShieldedPool.WrongActionForMarket.selector);
-        pool.withdraw(
-            _pA("withdraw"),
-            _pB("withdraw"),
-            _pC("withdraw"),
-            _a(".withdraw.root"),
-            _a(".withdraw.nullifierHash"),
-            _a(".withdraw.changeCommitment"),
-            plaintext
         );
     }
 

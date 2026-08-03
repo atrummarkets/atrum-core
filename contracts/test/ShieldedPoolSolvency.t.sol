@@ -72,7 +72,6 @@ contract ShieldedPoolSolvencyTest is Test {
 
     address resolver = makeAddr("resolver");
 
-    uint32 constant NO_MARKET = 0;
     uint32 constant MARKET_ID = 7;
     uint32 constant ENCRYPTED_MARKET_ID = 8;
     uint256 constant DENOM = 1e6;
@@ -369,18 +368,14 @@ contract ShieldedPoolSolvencyTest is Test {
         );
     }
 
-    /// @notice A settled market never pays out more than its own published total.
-    /// @dev The global bound alone would let one market drain another's collateral and only
-    ///      trip once the pool was empty, with the loser being whoever withdrew last.
-    ///      Per-market accounting localises the failure to the market that caused it.
-    function invariant_settledMarketNeverOverdrawn() public view {
-        if (!encrypted.settled(ENCRYPTED_MARKET_ID)) return;
-        assertLe(
-            pool.paidOutUnits(ENCRYPTED_MARKET_ID),
-            encrypted.finalYesTotal(ENCRYPTED_MARKET_ID) + encrypted.finalNoTotal(ENCRYPTED_MARKET_ID),
-            "market paid out more than its settled total"
-        );
-    }
+    // `invariant_settledMarketNeverOverdrawn` used to live here: a settled market's own
+    // published total bounded `paidOutUnits(marketId)` directly, localising an over-pay to the
+    // market that caused it rather than letting the global bound alone catch it once the pool
+    // was already empty. Removed because dropping `marketId` from the public `withdrawData`
+    // signal (closing the exit-correlation leak -- see `ShieldedPool._checkWithdrawable`) left
+    // `paidOutUnits` permanently zero: `_recordPayout` no longer has a `marketId` to index it
+    // by, so the assertion would pass vacuously over an untested invariant rather than proving
+    // anything. `invariant_neverPaysOutMoreThanDeposited` above is the bound that remains.
 
     /// @notice The recorded lifecycle is actually reachable through the handler.
     /// @dev Guards against the one failure mode this whole file is vulnerable to: if every
@@ -404,8 +399,11 @@ contract ShieldedPoolSolvencyTest is Test {
             handler.perform(i); // redeemPrivate .. withdrawUnbet
         }
         assertGt(pool.totalWithdrawnUnits(), 0, "nothing ever left the pool -- invariants would be vacuous");
-        assertGt(pool.paidOutUnits(ENCRYPTED_MARKET_ID), 0, "the settled market never paid out");
-        assertGt(pool.paidOutUnits(NO_MARKET), 0, "the unbet exit was never reached");
+        // `paidOutUnits` no longer distinguishes these paths (see the removed
+        // `invariant_settledMarketNeverOverdrawn` above) -- checked via the nullifier each
+        // withdrawal burns instead, which still proves both paths actually ran.
+        assertTrue(nullifiers.isSpent(_a(".withdraw.nullifierHash")), "the settled market never paid out");
+        assertTrue(nullifiers.isSpent(_a(".withdrawUnbet.nullifierHash")), "the unbet exit was never reached");
     }
 
     // -----------------------------------------------------------------------

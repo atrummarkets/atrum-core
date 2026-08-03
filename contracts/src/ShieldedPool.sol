@@ -216,11 +216,18 @@ contract ShieldedPool {
     // Per market: units consumed as stakes == totalPool, units produced as payouts <=
     // totalPool. Globally: sum of payouts <= sum of stakes <= sum of deposits.
     //
-    // The counters below make that bound explicit and cheap to check rather than leaving it
-    // as a proof on paper. `_paidOutUnits` is additionally bounded per market wherever the
-    // market's true total is public (i.e. once settled), so a bug that over-pays one market
-    // is caught at that market rather than later, when the shared pool runs dry and the
-    // victim is whoever withdrew last.
+    // The counter below makes that bound explicit and cheap to check rather than leaving it
+    // as a proof on paper.
+    //
+    // There used to be a second, per-market bound here, checked against each market's
+    // published settled total the moment it was known -- so a bug that over-paid one market
+    // was caught at that market rather than later, when the shared pool ran dry and the
+    // victim was whoever withdrew last. It relied on `marketId` being a public field of
+    // `withdrawData`. Dropping `marketId` from that signal (see `_unpackWithdrawData`) to
+    // close the exit-correlation leak removed the only thing that bound could be checked
+    // against: every settled withdrawal now trusts, with no independent check at withdraw
+    // time, that `redeemPrivate` never minted a SETTLED note it should not have. The global
+    // bound below is what remains.
     // -----------------------------------------------------------------------
 
     /// @notice The single collateral token. One token for the whole pool: two tokens would
@@ -237,7 +244,11 @@ contract ShieldedPool {
     uint256 public totalDepositedUnits;
     uint256 public totalWithdrawnUnits;
 
-    /// @notice Units paid out per market, bounded by that market's settled total.
+    /// @notice Dead state, kept only because it is public: `withdrawData` no longer carries a
+    ///         `marketId` to index this by (see `_unpackWithdrawData`), so `_recordPayout` no
+    ///         longer writes it and every entry reads 0 forever. Not removed outright because
+    ///         this redeploy already breaks the `Withdrawn` event's ABI; removing a public
+    ///         getter on top of that bought nothing.
     mapping(uint32 => uint256) public paidOutUnits;
 
     /// @notice The smallest crowd this pool will let a user hide in.
@@ -377,8 +388,10 @@ contract ShieldedPool {
 
     /// @notice Emitted when collateral actually leaves the pool.
     /// @dev The amount and recipient are public here, and must be -- a transfer is visible.
-    ///      Privacy comes from unlinkability, not from hiding this event.
-    event Withdrawn(address indexed recipient, uint32 indexed marketId, uint256 amount);
+    ///      Privacy comes from unlinkability, not from hiding this event. No longer carries
+    ///      `marketId`: `withdrawData` itself no longer packs it (see `_unpackWithdrawData`),
+    ///      so off-chain indexers lose per-market withdrawal analytics as a side effect.
+    event Withdrawn(address indexed recipient, uint256 amount);
 
     // -----------------------------------------------------------------------
     // Errors
@@ -421,8 +434,6 @@ contract ShieldedPool {
     /// @dev Carries both figures so a client can say "wait another 40 seconds" rather than
     ///      only "no", which is the difference between a retryable error and a dead end.
     error RootTooRecent(uint256 age, uint256 need);
-    /// @dev A settled market paid out more than its own published total.
-    error MarketOverdrawn(uint32 marketId);
 
     modifier onlySequencer() {
         if (msg.sender != sequencer) revert NotSequencer();
@@ -968,8 +979,8 @@ contract ShieldedPool {
         _requireRootAge(root);
         if (nullifiers.isSpent(nullifierHash)) revert NullifierAlreadySpent();
 
-        (uint32 marketId, address recipient, uint256 amount) = _unpackWithdrawData(withdrawData);
-        _checkWithdrawable(marketId, recipient, amount);
+        (bool unbetExit, address recipient, uint256 amount) = _unpackWithdrawData(withdrawData);
+        _checkWithdrawable(unbetExit, recipient, amount);
 
         if (!withdrawVerifier.verifyProof(pA, pB, pC, [root, nullifierHash, changeCommitment, withdrawData])) {
             revert InvalidProof();
@@ -985,40 +996,28 @@ contract ShieldedPool {
         // `merge` to call because no complete sets were ever minted -- see the shared-custody
         // notice for why, and for the arithmetic that bounds this instead.
         //
-        // Both bounds are checked BEFORE the transfer, so an over-payout reverts rather than
-        // succeeding and leaving the shortfall for whoever withdraws next.
-        _recordPayout(marketId, amount);
+        // Checked BEFORE the transfer, so an over-payout reverts rather than succeeding and
+        // leaving the shortfall for whoever withdraws next.
+        _recordPayout(amount);
 
         if (!collateral.transfer(recipient, amount * denomination)) {
             revert TransferFailed();
         }
 
-        emit Withdrawn(recipient, marketId, amount);
+        emit Withdrawn(recipient, amount);
     }
 
     /// @dev The solvency check that replaces the complete-set invariant.
     ///
-    ///      GLOBAL: total paid out can never exceed total deposited. This alone is enough to
-    ///      keep the pool from being drained, but it only trips once the damage is done and
-    ///      the loser is whoever withdrew last.
-    ///
-    ///      PER MARKET: once a market is settled its true total is public, so a market can be
-    ///      held to it directly and a bug that over-pays one market is caught at that market.
-    ///      Deliberately skipped when the market is not settled: a Void market never
-    ///      publishes totals, and its refunds are bounded by the notes that exist, which the
-    ///      global check already covers. Asserting an unknown bound would just be a revert
-    ///      with a made-up number in it.
-    function _recordPayout(uint32 marketId, uint256 amount) private {
+    ///      GLOBAL, and now the ONLY bound left: total paid out can never exceed total
+    ///      deposited. It only trips once the damage is done and the loser is whoever withdrew
+    ///      last -- previously a per-market bound caught an over-pay at the market that caused
+    ///      it instead. That bound needed `marketId` as a public field of `withdrawData`, which
+    ///      no longer exists (see `_unpackWithdrawData`); this is the trade that closing the
+    ///      exit-correlation leak cost.
+    function _recordPayout(uint256 amount) private {
         totalWithdrawnUnits += amount;
         if (totalWithdrawnUnits > totalDepositedUnits) revert PoolInsolvent();
-
-        paidOutUnits[marketId] += amount;
-
-        if (address(encryptedTotals) != address(0) && encryptedTotals.settled(marketId)) {
-            uint256 marketTotal =
-                encryptedTotals.finalYesTotal(marketId) + encryptedTotals.finalNoTotal(marketId);
-            if (paidOutUnits[marketId] > marketTotal) revert MarketOverdrawn(marketId);
-        }
     }
 
     /// @dev Refuse a bet that cannot be private.
@@ -1052,7 +1051,7 @@ contract ShieldedPool {
         }
     }
 
-    function _checkWithdrawable(uint32 marketId, address recipient, uint256 amount) private view {
+    function _checkWithdrawable(bool unbetExit, address recipient, uint256 amount) private view {
         if (recipient == address(0)) revert InvalidRecipient();
         // Rejected in-circuit too. Checked again because a zero withdrawal burns the note and
         // pays nothing -- a silent loss of funds with no error anywhere.
@@ -1079,42 +1078,50 @@ contract ShieldedPool {
         uint256 atRung = depositsAtDenomination[amount];
         if (atRung < minAnonymitySet) revert DenominationTooRare(amount, atRung, minAnonymitySet);
 
-        // NO_MARKET is the unbet exit: collateral that was deposited and never staked. It has
-        // no vault, no outcome and no settlement to wait for, so every check below is not
-        // merely skippable but meaningless -- there is no market to ask about.
+        // `unbetExit` is the ONLY fact about the spent note's market that `withdrawData` still
+        // carries -- see `_unpackWithdrawData`. It replaced `marketId == NO_MARKET` to close
+        // the exit-correlation leak: the old public `marketId` field let a winner's withdrawal
+        // be traced straight back to the market they won in, regardless of how private the bet
+        // itself was.
         //
-        // The proof is what makes this safe to short-circuit. `withdraw.circom` derives the
-        // spent note's outcome from `marketId`, so `marketId == 0` in `withdrawData` can ONLY
-        // have come from spending a note whose committed outcome was UNBET. A SETTLED note
-        // cannot be routed here, and an unbet note cannot be routed down the settled path.
+        // An unbet note has no vault, no outcome and no settlement to wait for, so every check
+        // below is not merely skippable but meaningless -- there is no market to ask about.
+        // The proof is what makes this safe to short-circuit: `withdraw.circom` derives the
+        // spent note's outcome from its (private) `marketId`, so `unbetExit` can ONLY be set
+        // from spending a note whose committed outcome was UNBET. A SETTLED note cannot be
+        // routed here, and an unbet note cannot be routed down the settled path.
         //
-        // Solvency still holds: an unbet note is backed 1:1 by the deposit that created it,
-        // `amount + change == units` is proved in-circuit, and `_recordPayout` applies the
-        // global bound against `totalDepositedUnits` regardless of which path was taken.
-        if (marketId == NO_MARKET) return;
+        // Solvency still holds for this path: an unbet note is backed 1:1 by the deposit that
+        // created it, `amount + change == units` is proved in-circuit, and `_recordPayout`
+        // applies the global bound against `totalDepositedUnits` regardless of which path was
+        // taken.
+        if (unbetExit) return;
 
-        Vault vault = marketVault[marketId];
-        if (address(vault) == address(0)) revert MarketNotRegistered();
-
-        // Encrypted markets only. A SETTLED note can today only come from `redeemPrivate`,
-        // which is already encrypted-only -- but that is a reachability argument spanning two
-        // circuits and a contract, and this is where collateral leaves. Assert it directly.
-        if (!encryptedMarket[marketId]) revert WrongActionForMarket();
-
-        if (address(encryptedTotals) == address(0)) revert AlreadyBound();
-        if (!encryptedTotals.settled(marketId)) revert NotSettled2();
+        // THE SETTLED-PAYOUT BRANCH HAS NO CHECK LEFT TO RUN.
+        //
+        // Every check that used to live here -- `marketVault[marketId]` registered,
+        // `encryptedMarket[marketId]` true, `encryptedTotals.settled(marketId)` -- needed the
+        // actual `marketId`, and `withdrawData` no longer carries it. There is nothing to look
+        // up. A settled withdrawal is now trusted on the strength of a two-circuit reachability
+        // argument alone -- `redeem_private.circom` only ever emits outcome SETTLED after its
+        // own settlement check, and `withdraw.circom` only reaches this branch for a note
+        // committed with that outcome -- with NO independent on-chain check at the moment
+        // collateral actually leaves. `_recordPayout`'s global bound is what remains.
     }
 
-    /// @dev withdrawData = marketId * 2^200 + recipient * 2^40 + amount
-    ///      Must match `withdraw.circom` exactly.
+    /// @dev withdrawData = unbetExit * 2^200 + recipient * 2^40 + amount
+    ///      Must match `withdraw.circom` exactly. `unbetExit` occupies the bit that used to
+    ///      hold the full `marketId` -- `withdraw.circom` packs `marketZero.out` there
+    ///      directly, so only bit 200 is ever set, never the full 32-bit range the layout still
+    ///      has room for.
     function _unpackWithdrawData(uint256 withdrawData)
         internal
         pure
-        returns (uint32 marketId, address recipient, uint256 amount)
+        returns (bool unbetExit, address recipient, uint256 amount)
     {
         amount = withdrawData & ((uint256(1) << 40) - 1);
         recipient = address(uint160((withdrawData >> 40) & type(uint160).max));
-        marketId = uint32(withdrawData >> 200);
+        unbetExit = (withdrawData >> 200) != 0;
     }
 
     /// @dev redeemMeta = marketId * 2^130 + outcome * 2^128 + totalPool * 2^64 + winningPool

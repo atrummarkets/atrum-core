@@ -744,9 +744,9 @@ async function main() {
   const wdChangeCommitment = noteCommitment(wdChangeNote);
   const wdNullifierHash = nullifierHash(rpSettledNote.nullifier);
 
-  // withdrawData = marketId * 2^200 + recipient * 2^40 + amount
-  const wdWithdrawData =
-    ENCRYPTED_MARKET_ID * (1n << 200n) + wdRecipient * (1n << 40n) + wdAmount;
+  // withdrawData = unbetExit * 2^200 + recipient * 2^40 + amount. A settled payout has a
+  // nonzero marketId, so the circuit's `marketZero.out` -- and this bit -- is 0.
+  const wdWithdrawData = 0n * (1n << 200n) + wdRecipient * (1n << 40n) + wdAmount;
 
   const wdProof = await prove("withdraw", {
     root: wdRootAfterBatch,
@@ -849,10 +849,9 @@ async function main() {
   const unbetChangeCommitment = noteCommitment(unbetChangeNote);
   const unbetNullifierHash = nullifierHash(unbetNote.nullifier);
 
-  // marketId is 0, so withdrawData is just recipient and amount -- the whole top field is
-  // the sentinel, which is exactly what the contract branches on.
-  const unbetWithdrawData =
-    NO_MARKET * (1n << 200n) + wdRecipient * (1n << 40n) + unbetAmount;
+  // marketId is 0, so the circuit's `marketZero.out` -- and this bit -- is 1: the sentinel
+  // the contract branches on is now one bit, not the full marketId.
+  const unbetWithdrawData = 1n * (1n << 200n) + wdRecipient * (1n << 40n) + unbetAmount;
 
   const unbetWithdrawProof = await prove("withdraw", {
     root: unbetRoot,

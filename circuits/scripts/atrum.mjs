@@ -135,14 +135,17 @@ export function packRedeemMeta(marketId, outcome, totalPool, winningPool) {
 }
 
 /**
- * withdrawData = marketId*2^200 + recipient*2^40 + amount
+ * withdrawData = unbetExit*2^200 + recipient*2^40 + amount
  *
- * Matches `withdraw.circom:155` and `ShieldedPool._unpackWithdrawData`. `amount` is 40 bits,
- * not 64 -- the wider unit field does not fit alongside a 160-bit address.
+ * Matches `withdraw.circom:178` and `ShieldedPool._unpackWithdrawData`. `amount` is 40 bits,
+ * not 64 -- the wider unit field does not fit alongside a 160-bit address. `unbetExit` used to
+ * be the full `marketId`; narrowed to one bit so a winner's withdrawal no longer publicly names
+ * the market they won in, which was deanonymising every winner regardless of how private the
+ * bet itself was.
  */
-export function packWithdrawData(marketId, recipient, amount) {
+export function packWithdrawData(unbetExit, recipient, amount) {
   if (amount >= 1n << AMOUNT_BITS) throw new Error("amount out of range");
-  return marketId * (1n << 200n) + BigInt(recipient) * (1n << AMOUNT_BITS) + amount;
+  return (unbetExit ? 1n : 0n) * (1n << 200n) + BigInt(recipient) * (1n << AMOUNT_BITS) + amount;
 }
 
 /**

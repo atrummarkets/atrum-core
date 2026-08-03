@@ -55,12 +55,16 @@ template Withdraw(levels, AMOUNT_BITS) {
     signal input root;
     signal input nullifierHash;
     signal input changeCommitment;
-    /// withdrawData = marketId * 2^200 + recipient * 2^40 + amount
+    /// withdrawData = unbetExit * 2^200 + recipient * 2^40 + amount
     ///
-    /// 32 + 160 + 40 = 232 bits, inside the 254-bit field. `marketId` must be public because
-    /// the contract has to know WHICH vault the collateral comes out of, and `recipient` must
-    /// be bound into the proof or a mempool watcher lifts the proof and swaps in their own
-    /// address -- the POC already learned that one.
+    /// 1 + 160 + 40 = 201 bits, inside the 254-bit field. `unbetExit` is the only fact about
+    /// `marketId` the contract still needs on chain: whether this is liquid unbet collateral
+    /// leaving (no market-specific claim at all) or a payout claiming to have come from
+    /// `redeemPrivate`. The actual `marketId` stays private -- see `_checkWithdrawable` in
+    /// `ShieldedPool.sol` for what that costs: the settled branch can no longer bound a payout
+    /// against its own market's solvency at withdraw time, only against the pool-wide total.
+    /// `recipient` must still be bound into the proof or a mempool watcher lifts the proof and
+    /// swaps in their own address -- the POC already learned that one.
     signal input withdrawData;
 
     // ---- PRIVATE ----
@@ -164,14 +168,14 @@ template Withdraw(levels, AMOUNT_BITS) {
 
     changeCommitment === changeNote.commitment;
 
-    // 6. Bind the packed public value. Every field range-checked, or the layout is not
-    //    injective and bits carry between fields.
-    component marketBits = Num2Bits(32);
-    marketBits.in <== marketId;
+    // 6. Bind the packed public value. `recipient` is range-checked or the layout is not
+    //    injective and bits carry between fields. `unbetExit` (`marketZero.out`, computed in
+    //    step 1) needs no range check of its own: `IsZero` output is already constrained to
+    //    {0, 1} by construction.
     component recipientBits = Num2Bits(160);
     recipientBits.in <== recipient;
 
-    withdrawData === marketId * (1 << 200) + recipient * (1 << 40) + amount;
+    withdrawData === marketZero.out * (1 << 200) + recipient * (1 << 40) + amount;
 
     // 7. The change note must differ from the note it replaces. Fresh secrets are supplied,
     //    but if a caller reused them AND withdrew nothing the two leaves would coincide,
