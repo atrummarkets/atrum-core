@@ -341,7 +341,7 @@ contract CheckupTest is Test {
         _eq(vault.denomination(), DENOM, "denomination (fixed split size)");
         _check(vault.resolver() == resolver, "resolver", "immutable");
         _eq(uint8(vault.outcome()), 0, "outcome (Unresolved)");
-        _eq(vault.MIN_RESOLUTION_GAP(), 1 hours, "MIN_RESOLUTION_GAP");
+        _eq(vault.MIN_RESOLUTION_GAP(), 3 minutes, "MIN_RESOLUTION_GAP");
 
         address alice = address(0xA11CE);
         usdc.mint(alice, 100 * DENOM);

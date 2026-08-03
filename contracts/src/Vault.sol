@@ -79,7 +79,12 @@ contract Vault {
     uint64 public immutable resolutionStartTime;
 
     /// @notice Minimum enforced gap between betting close and resolution start.
-    uint64 public constant MIN_RESOLUTION_GAP = 1 hours;
+    /// @dev 1 hour is the production intent -- long enough that a determined-but-unsubmitted
+    ///      outcome cannot be front-run by a last-second bet. Shortened to 3 minutes for THIS
+    ///      testnet deployment so a demo loop does not require a real wait; immutable and
+    ///      readable on chain like every other test-vs-production constant here (see
+    ///      `ShieldedPool.minAnonymitySet`'s K=2-vs-8 pattern), not something to trust silently.
+    uint64 public constant MIN_RESOLUTION_GAP = 3 minutes;
 
     /// @notice How long after resolution opens before anyone may void an unresolved market.
     ///
