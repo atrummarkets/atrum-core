@@ -1,6 +1,6 @@
 # Atrum — Handoff
 
-**As of 2 August 2026.** What has been claimed, what has actually been verified, and
+**As of 3 August 2026.** What has been claimed, what has actually been verified, and
 what stands between here and hosting a real private prediction market.
 
 Written to be read by someone who has not seen the earlier conversation.
@@ -8,6 +8,19 @@ Written to be read by someone who has not seen the earlier conversation.
 ---
 
 ## NEXT UP — start here
+
+**There is a front end now, and it is wired to a real deployment.** `atrum-markets/` (sibling
+repo, Next.js) lists seven markets, connects a real wallet, and drives the full lifecycle on
+Monad testnet. Read §0-quater below before touching it: the architecture has one deliberate,
+disclosed trust compromise (proving runs server-side, so the server sees note secrets) and
+that is the single biggest thing standing between this and something users should trust.
+
+**Live deployment: pool `0xcF2b211397dC7499331F227DdDec9436FE9Da379`**, `minAnonymitySet = 2`
+(a DEMO value; production is 8), `minRootAge = 0`. Everything before it this session is
+orphaned — see §0-quater for the two redeploys and why.
+
+The rest of this section describes the PREVIOUS deployment (`0x26969270…`) and remains true
+about the protocol; only the addresses moved.
 
 **The four privacy phases from `DESIGN-PRIVACY.md` are done and verified on chain.** Read
 that document's §4 for what changed and, more importantly, for the two places its own plan
@@ -150,6 +163,174 @@ were only visible once the code was written. Expect more of these.
 
 ---
 
+
+## 0-quater. A real front end, on 2026-08-03 — and the trust it currently costs
+
+`atrum-markets/` is a Next.js app that lists markets, connects a wallet, and drives deposit →
+bet → resolve → settle → redeem → withdraw against a live pool. It replaces the shared-key
+demo harness described in §0-ter, which had no wallet and one hardcoded market.
+
+**What a user does, and who signs what:**
+
+| action | signed by | gas paid by | why |
+|---|---|---|---|
+| `deposit` | **the user's own wallet** | the user | `transferFrom(msg.sender)` — relaying it would move the payment link one hop, not remove it. The boundary is public BY DESIGN. |
+| `betEncrypted` / `redeemPrivate` / `withdraw` | **a relayer** | the operator | proof-gated, never sender-gated. This is the whole point of `sequencer/src/relay.ts`, and it is now actually switched on. |
+
+**[MEASURED] The relaying claim, checked on chain rather than in the UI.** A fresh wallet
+(`0x1E5537C98820015f86aadb3A86B62c510C8A97D6`) ran the flow through the browser. Its nonce
+afterwards was **3** — mint, approve, deposit, the three transactions it signed. The bet
+(`0xc3b1ec63e2c246c105a0e6870680f57434d20c5efd6d5098f23528e0d6a56e02`) has
+`from = 0xDcE2557410A6C374219830Dc86A60cec52B47cBd`, a relay account. The user's address is
+genuinely not on their own bet. Deposit landed at **1,135,409 gas**, consistent with the
+~1,135,4xx figure recorded for this pool's earlier deposits.
+
+### THE TRUST COMPROMISE, stated plainly
+
+**Proving runs on the server, so the server sees every note secret.** A witness needs the
+`nullifier` and `secret` that spend a note; the browser sends them to an API route, which
+builds the Groth16 proof and relays it. Two consequences, and neither is hypothetical:
+
+1. A server compromise reveals every user's positions and can spend every note.
+2. Because the server already holds the secrets, note STORAGE was also put server-side
+   (`.data/notes.json`, keyed by owner address, guarded by a signature-derived session).
+   That is defensible only as a consequence of (1) — it adds no assumption that server-side
+   proving had not already forced — and it buys multi-device access and no lost notes.
+
+The production design is the opposite: the browser holds its own secrets and proves locally.
+HANDOFF §0-bis already measured that this is viable — 29.7MB of artefacts, cached in
+IndexedDB, `bet_encrypted` at 1.83s in a browser — and §0-bis's own conclusion was that
+proving MUST run in a Web Worker. None of that is built. **Until it is, this deployment is
+custodial in the way that matters, and the UI says so on both the market and boundary pages
+rather than burying it.**
+
+### Two redeploys, and the reason for the first one
+
+`0xcF2b2113…` is the third pool of the session. The first (`0x6BAE039F…`) was orphaned within
+the hour by a stale-artefact bug worth recording, because it is the THIRD time this class has
+bitten (see the deployments README's bugs #2 and #3):
+
+> **`circuits/build/` had drifted from `circuits/src/`.** `deposit.circom` no longer declares
+> a `marketId` signal — the deposit-names-no-market change — but the compiled `deposit.wasm`
+> in the tree still did. Every proof attempt failed with `Not all inputs have been set. Only 4
+> out of 5`. Nothing detects this: the source is right, the tests pass (CI rebuilds both
+> halves in one run), and only a client building a witness against the on-disk artefact ever
+> notices. Fixed by `make circuits && make verifiers` and redeploying, which is also what
+> forced the second pool.
+
+The lesson is the same one the README already states and this repo keeps re-learning: **a
+build artefact and its source can disagree silently, and the failure surfaces somewhere else
+entirely.** A checked-in hash of `src/` compared at build time would catch it; that is not
+built either.
+
+### [FIXED] Two front-end bugs that only a real browser found
+
+Both were invisible to a type-check and to the API-level tests, and both were caught by
+driving the app with a real injected wallet:
+
+- **A page refresh forgot the wallet.** The session cookie survived, React state did not, so
+  the app rendered a signed-in user with no address and no chain: balance read `—` and the
+  header demanded a chain switch that had already happened. Fixed by restoring on mount with
+  `eth_accounts` (the silent form — `eth_requestAccounts` would prompt on every page load).
+- **A failed poll blanked the entire note list.** `fetchNotes().catch(() => setNotes([]))`
+  meant one timeout emptied the table. Notes are the user's money; an empty table reads as
+  "everything is gone". It now keeps the last known-good list and retries.
+
+### Every fabricated number was removed
+
+The UI was ported from a design mock and carried its invented figures. They were not
+harmless: a confident wrong number is worse than no number, and two of them contradicted the
+protocol.
+
+| was | now |
+|---|---|
+| a "constraints satisfied" counter animating to **1,048,576** | the real count, read from the `.r1cs` header at request time (`server/atrum/circuits.ts`) — `deposit` 1,621, `bet_encrypted` 21,252, `redeem_private` 14,405, `withdraw` 14,408, verified identical to `snarkjs r1cs info` |
+| stakes and payouts labelled **"MON"** | the collateral is a 6-decimal **USDC** mock; symbol and decimals are read from the token |
+| `ANONYMITY_FLOOR = 12` hardcoded | `minAnonymitySet` read from the pool (this deployment: **2**) |
+| "last republish 00:14:22 ago", "41 notes ahead", "31 withdrawals this hour" | deleted, or replaced with live `queuedCount` / `batchCount` |
+| a progress bar during proving | **removed.** The prover reports no progress, so a bar was decorative. The overlay shows the real step and a real elapsed clock, and says why there is no bar. |
+
+Constraint counts are PARSED rather than transcribed for the same reason the committee key is
+read rather than hardcoded: a constant copied out of this document goes stale the next time
+`make circuits` runs, and nothing would announce it.
+
+### Markets are a registry file, not a log scan
+
+`ShieldedPool` cannot enumerate its own markets — there is no array, only `marketVault[id]` —
+and this repo's standing rule is never to build on `eth_getLogs` (100-block cap on the public
+RPC). `circuits/scripts/seed-markets.mjs` creates a batch of markets and writes
+`atrum-markets/markets.json`.
+
+That file is a **cache of ids, not a source of truth**: betting window, outcome and settled
+totals are re-read from the vault on every request. A stale or tampered registry can only
+list or omit a market, never misstate one.
+
+### What is new and still unsatisfying
+
+- **The mid-market ratio is decrypted server-side for display.** No publisher service exists
+  (§1b), so the app holds the disclosed committee secret and decrypts the accumulator to show
+  live odds. This is precisely the leak §"The privacy leak found in the publisher's design"
+  describes — a precise, continuously-updated ratio is a sequence of equations in the running
+  sums. Real deployments must publish coarsely and on a cadence. The UI states this on the
+  odds board; it does not excuse it.
+- **Resolution is an EOA on every seeded market.** `PythResolver` exists and works
+  (`0x7de5Cd77…` on this pool, market 10), but the seeded demo markets name the operator as
+  `Vault.resolver` so outcomes can be driven on demand. The operator panel is shown in the UI
+  rather than hidden, because hiding it would not make the market trustless.
+- **Sessions replay.** The sign-in nonce is echoed by the client rather than tracked
+  server-side, so a signature the user already produced can be replayed. Acceptable only
+  because a session grants access to notes the signer already owns; a production build needs
+  server-issued single-use nonces.
+- **Operator funding is now a live dependency.** Relaying spends the operator's gas on users'
+  behalf, and `ACTION_GAS_LIMIT` bills the full declared 2,500,000 regardless of use — about
+  0.5 MON per action. Three relay accounts and the sequencer's batching account all need
+  watching; the batching account already ran dry once mid-session and every `flushBatch`
+  reverted until it was topped up.
+
+### Addresses for this deployment
+
+| contract | address |
+|---|---|
+| ShieldedPool | `0xcF2b211397dC7499331F227DdDec9436FE9Da379` |
+| Collateral (MockERC20, 6dp, permissionless `mint`) | `0x306cBE8c76dC0c2F5A7C90559003096b0AcDC554` |
+| EncryptedParimutuelPool | `0xE301c4cf09d9ED1DF4591CCFc757fA2547e0495a` |
+| ElGamalAccumulator | `0x27Cb0E6813807c60F16bFE3E1C3ed317504a2dEB` |
+| IncrementalMerkleTree | `0x01947CDf891BCA485e62fA7876fbf6c0D34019eF` |
+| MappingNullifierSet | `0x838e37C930C0773E773b425970161F58bD27FA99` |
+| PythResolver | `0x7de5Cd779B77356348aDf870d74fD9c6A0261eC1` |
+| DepositVerifier | `0xDf30126AE1545D38e59AAf54489CFdd7Af6e6907` |
+| BetEncryptedVerifier | `0xc3df60a600C478b4Abca43e2ec82920a785c28f2` |
+| RedeemPrivateVerifier | `0xBdaf19c0508783F0440b4464a1e55366d6B83ce3` |
+| WithdrawVerifier | `0xAC11ac605Ff3547D6f6B38a56C4C35e5C8692cA4` |
+
+Sequencer batching account `0x0f85c6875a2c29BbabeF070Fa00CE9f72B874538` (this is what
+`SEQUENCER` was set to at deploy — see §0-ter's GOTCHA, which is why it must match). Relay
+accounts derive from a SEPARATE mnemonic, index 0–2, first is
+`0xDcE2557410A6C374219830Dc86A60cec52B47cBd`.
+
+Markets 31–37 are seeded demo markets; 7/8/10 come from `Deploy.s.sol` as always.
+
+### Running it
+
+```bash
+# 1. sequencer, with batching AND relaying (sequencer/.env.local, gitignored)
+cd sequencer && node --experimental-strip-types src/main.ts
+#    needs POOL_ADDRESS, RELAYER_MNEMONIC (batching), RELAY_MNEMONIC (relaying, separate),
+#    RELAY_TOPUP_AMOUNT_WEI. Use a private RPC: the public one falsely reports
+#    "Signer had insufficient balance" under load -- see sequencer/src/chains.ts, hit again
+#    this session on Alchemy and worked around by switching to Ankr.
+
+# 2. the app (atrum-markets/.env.local, gitignored)
+cd ../../atrum-markets && npm run dev
+#    needs ATRUM_CORE_DIR (it proves against circuits/build/ in this repo), POOL_ADDRESS,
+#    COLLATERAL_ADDRESS, RPC_URL, SEQUENCER_URL, PRIVATE_KEY (operator, resolve/settle only),
+#    SESSION_SECRET.
+```
+
+`seed-markets.mjs` and `create-manual-market.mjs` create markets on an existing pool without
+redeploying — `registerEncryptedMarket` is admin-gated but has no deploy-time restriction.
+
+---
 
 ## 0-ter. The client's other three actions, and two more bugs use found
 
@@ -1093,10 +1274,12 @@ most **~28 proofs**. Batch size is bounded by the transaction limit, not the blo
 **The protocol is done.** Everything that could have failed for cryptographic or gas reasons
 now works on a real chain. What remains is three different KINDS of work:
 
-1. **Frontend** — nothing exists. Ordinary web work, and the critical path for a demo, the
-   video, real users and feedback. Shaped by the proving spike above: cache artifacts in
-   IndexedDB, lazy-load per action, prove in a Web Worker. Measure the browser multiplier
-   first.
+1. ~~**Frontend** — nothing exists.~~ **PARTLY DONE, see §0-quater.** `atrum-markets/` lists
+   markets, connects a wallet, and drives the full lifecycle on testnet. What is NOT done is
+   the part this item was really about: **proving still runs on the server, so the server
+   sees every note secret.** Moving it into the browser — IndexedDB-cached artefacts,
+   lazy-loaded per action, a Web Worker, all as §0-bis measured — is the remaining work, and
+   it is what separates a demo from something a user should trust with money.
 2. **Fixture lifecycle rewrite** — mechanical. Deletes `registerMarket`, `bet()`,
    `ParimutuelPool` and the plaintext verifiers, leaving one market type and one exit. Blocks
    nothing, but every line of dead code is audit surface you pay for.
