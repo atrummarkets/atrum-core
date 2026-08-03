@@ -22,11 +22,37 @@ else:
    is what stands between this and something users can *use*. It is the cheapest of the two
    to fix and blocks nothing.
 
-**Live deployment: pool `0xcF2b211397dC7499331F227DdDec9436FE9Da379`**, `minAnonymitySet = 2`
-(a DEMO value; production is 8), `minRootAge = 0`. Everything before it this session is
-orphaned — see §0-quater for the two redeploys and why.
+**Live deployment: pool `0xeC41Dd059d2CfDa55FAB3680E599D4af3aF4ad8f`**, `minAnonymitySet = 2`
+(a DEMO value; production is 8), `minRootAge = 0`. Collateral (MockERC20)
+`0xF7DE25a5D8be39fEE780f4AeDCb484E6533943E0`.
 
-The rest of this section describes the PREVIOUS deployment (`0x26969270…`) and remains true
+**`0xcF2b2113…` above (and everything before it) is now ALSO orphaned — same bug, a third
+time.** `atrum-core/circuits/build/` had drifted from what `0xcF2b2113…`'s verifiers were
+actually deployed against (no rebuild command run since is recorded anywhere, but the
+non-determinism this project keeps re-learning about doesn't need one to be found — see
+`deployments/monad-testnet-10143/README.md`'s bug #3). Found via `atrum-markets`' own deposit
+failing `execution reverted` in the browser, confirmed by calling the dead pool's
+`DepositVerifier` directly with a fresh proof and getting `false`. Fixed the only way this bug
+class is ever fixed: `make verifiers` (no intervening `make circuits`, so the new verifiers are
+guaranteed to match what's currently on disk) then a fresh `Deploy.s.sol`, same operator, same
+`sequencer` address, same committee key. Re-verified the fix directly: the same proof against
+the new `DepositVerifier` returns `true`. Full address table and cost:
+`deployments/monad-testnet-10143/README.md`.
+
+`atrum-markets/circuits-build/` (this session also removed its `ATRUM_CORE_DIR` dependency —
+see below) was resynced from this same `circuits/build/`, so it matches the new pool too.
+Markets 40/41/42 (BTC/ETH/SOL, oracle-resolved, replacing `atrum-markets/markets.json`'s old
+seeded demo markets 31-37) were re-registered on the new pool with `create-market.mjs`, fixed
+this session to target the right registry file and schema — it previously wrote to
+`atrum-client/markets.json`, a stale sibling.
+
+**Outstanding**: the sequencer's Render deployment (`atrum-core.onrender.com`) needs its
+`POOL_ADDRESS` updated to the new pool and restarting — an external service, not reachable from
+this session. The local `sequencer/.env` was found already stale/disconnected from whatever
+Render actually runs (its `RELAYER_MNEMONIC` derives to an unrelated test wallet, not this
+pool's `sequencer`) — a separate, pre-existing gap, not something this redeploy caused.
+
+The rest of this section describes an EARLIER deployment (`0x26969270…`) and remains true
 about the protocol; only the addresses moved.
 
 **The four privacy phases from `DESIGN-PRIVACY.md` are done and verified on chain.** Read

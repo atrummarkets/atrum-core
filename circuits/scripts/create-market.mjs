@@ -10,10 +10,13 @@
  *   1. deploy a Vault, resolver = the pool's existing PythResolver, spec hashed and committed
  *   2. registerEncryptedMarket(marketId, vault)
  *
- * Then appends the market to atrum-client's markets.json registry, because ShieldedPool has
- * no on-chain way to list "all markets" -- no array, just marketVault[id] lookups -- and this
- * project's own rule is never build on eth_getLogs (100-block cap on the public RPC). A
- * committed registry file is the alternative that doesn't need log scanning.
+ * Then appends the market to atrum-markets' markets.json registry (same file, same
+ * resolverType/category/vault/resolver/bettingCloseTime/resolutionStartTime/createdAt shape
+ * seed-markets.mjs writes -- just resolverType "oracle" -- so the front end's registry.ts
+ * doesn't need to know two schemas), because ShieldedPool has no on-chain way to list "all
+ * markets" -- no array, just marketVault[id] lookups -- and this project's own rule is never
+ * build on eth_getLogs (100-block cap on the public RPC). A committed registry file is the
+ * alternative that doesn't need log scanning.
  *
  * Usage:
  *   PRIVATE_KEY=0x... POOL=0x... node scripts/create-market.mjs \
@@ -29,7 +32,8 @@ import { ethers } from "ethers";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RPC = process.env.RPC_URL ?? "https://testnet-rpc.monad.xyz";
-const REGISTRY_PATH = join(HERE, "..", "..", "..", "atrum-client", "markets.json");
+const REGISTRY_PATH =
+  process.env.REGISTRY ?? join(HERE, "..", "..", "..", "atrum-markets", "markets.json");
 
 // Verified live against Hermes on 2026-08-02 -- Pyth's own feed directory
 // (hermes.pyth.network/v2/price_feeds?query=<SYM>), not copied from memory. A wrong feed id
@@ -167,26 +171,25 @@ async function main() {
 
   const registry = existsSync(REGISTRY_PATH)
     ? JSON.parse(readFileSync(REGISTRY_PATH, "utf8"))
-    : { pool: poolAddress, markets: [] };
+    : { pool: poolAddress, collateral, markets: [] };
   if (registry.pool !== poolAddress) {
     console.log(`note: registry was for pool ${registry.pool}, now recording markets for ${poolAddress}`);
-    registry.pool = poolAddress;
   }
+  registry.pool = poolAddress;
+  registry.collateral = collateral;
   registry.markets = registry.markets.filter((m) => m.id !== marketId);
   registry.markets.push({
     id: marketId,
     question,
-    type: "oracle",
-    symbol: symbol.toUpperCase(),
-    direction,
-    threshold: thresholdArg,
+    category: "Crypto",
+    resolverType: "oracle",
     vault: vault.address,
     resolver: resolverAddress,
-    spec: { priceId, threshold: threshold.toString(), thresholdExpo, targetTime, windowSeconds: 3600, greaterThan: direction === "above" },
     bettingCloseTime,
     resolutionStartTime,
     createdAt: now,
   });
+  registry.markets.sort((a, b) => a.id - b.id);
   writeFileSync(REGISTRY_PATH, `${JSON.stringify(registry, null, 2)}\n`);
   console.log(`recorded in ${REGISTRY_PATH}`);
 }

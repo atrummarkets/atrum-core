@@ -94,12 +94,97 @@ lived for under an hour; its transaction evidence is in `HANDOFF.md` instead.
 | ElGamalAccumulator | `0x1C1C3974d35304396cDD93136bfAD06b13E65AB3` |
 | MappingNullifierSet | `0xE0E119dEcaba161783A4dbE8DB59263326287829` |
 
+## SUPERSEDED — `0xcF2b2113…`, dead as of 2026-08-03 (never recorded here until now)
+
+This README was never updated when `atrum-markets`' HANDOFF.md session redeployed twice more
+past the `0x26969270…` pool below: first to `0x6BAE039F…` (orphaned within the hour by the
+same stale-verifier bug as `0x6af21cA1…` above), then to
+`0xcF2b211397dC7499331F227DdDec9436FE9Da379`, which is what `atrum-markets` actually pointed
+at and where its full front-end lifecycle (deposit through withdraw, real transactions) was
+measured — see `HANDOFF.md`'s "0-quater" section.
+
+**Killed by bug #3 again** (verifiers stale after a routine circuit rebuild), found this time
+by the front end's own deposit failing `execution reverted` with no other diagnostic, then
+confirmed by calling the deployed `DepositVerifier` directly with a proof built from the
+current `circuits/build/deposit.zkey` — `verifyProof(...)` returned `false`. No backup of
+whatever zkey this pool's verifiers WERE built against survives anywhere on disk, so unlike the
+bytecode-hash comparisons used above, there was nothing left to diff against; the on-chain
+`false` is the only evidence, and it's sufficient.
+
+| contract | address |
+|---|---|
+| ShieldedPool | `0xcF2b211397dC7499331F227DdDec9436FE9Da379` |
+| Collateral (MockERC20) | `0x306cBE8c76dC0c2F5A7C90559003096b0AcDC554` |
+| EncryptedParimutuelPool | `0xE301c4cf09d9ED1DF4591CCFc757fA2547e0495a` |
+| ElGamalAccumulator | `0x27Cb0E6813807c60F16bFE3E1C3ed317504a2dEB` |
+| IncrementalMerkleTree | `0x01947CDf891BCA485e62fA7876fbf6c0D34019eF` |
+| MappingNullifierSet | `0x838e37C930C0773E773b425970161F58bD27FA99` |
+| PythResolver | `0x7de5Cd779B77356348aDf870d74fD9c6A0261eC1` |
+| DepositVerifier | `0xDf30126AE1545D38e59AAf54489CFdd7Af6e6907` |
+| BetEncryptedVerifier | `0xc3df60a600C478b4Abca43e2ec82920a785c28f2` |
+| RedeemPrivateVerifier | `0xBdaf19c0508783F0440b4464a1e55366d6B83ce3` |
+| WithdrawVerifier | `0xAC11ac605Ff3547D6f6B38a56C4C35e5C8692cA4` |
+
 ## Current deployment
 
-`ShieldedPool` **`0x26969270fFB9c0b8307abB4b8a14057DA9C50Fec`** — 2026-08-02. `minAnonymitySet
-= 8` (production value), `minRootAge = 0`, `Vault.MIN_RESOLUTION_GAP = 3 minutes` (**demo
-value**, production intent is 1 hour — see `contracts/src/Vault.sol`). This is the pool
-`atrum-client` points at.
+`ShieldedPool` **`0xeC41Dd059d2CfDa55FAB3680E599D4af3aF4ad8f`** — 2026-08-03. Deployed fresh
+from the current, self-consistent `circuits/build/` (`make verifiers` immediately beforehand,
+no intervening `make circuits`), specifically to fix the `0xcF2b2113…` death above. Same
+operator (`0x364EDC06254874e62FF4AD8fA4d9a45238cb5609`, deployer/admin), same `sequencer`
+(`0x0f85c6875a2c29BbabeF070Fa00CE9f72B874538`, so the already-running Render sequencer needs no
+reconfiguration on its relayer side) and same committee key (test key, unchanged) as the pool
+it replaces. `minAnonymitySet = 2` (`MIN_ANONYMITY_SET` env override, matching the demo value
+the prior pools used), `minRootAge = 0`. This is the pool `atrum-markets` points at.
+
+**Verified the fix, not just assumed it**: built a real deposit proof from
+`circuits-build/deposit.zkey` (the exact file `atrum-markets`' server proves against) and
+called this pool's `DepositVerifier.verifyProof(...)` directly — **`true`** (was `false`
+against the dead pool's verifier, above, with an otherwise-identical proof).
+
+- **Deployed at block** 50,543,384–50,543,514
+- **Deployer / sequencer** `0x364EDC06254874e62FF4AD8fA4d9a45238cb5609` (deployer/admin) /
+  `0x0f85c6875a2c29BbabeF070Fa00CE9f72B874538` (sequencer)
+- **RPC** `https://rpc.ankr.com/monad_testnet` (the public `testnet-rpc.monad.xyz` rate-limits
+  at 15/sec under this app's polling load; see `atrum-markets/.env.local`)
+- **Cost** ~2.44 MON for the deploy (24 txs, 23,649,514 gas)
+- Raw receipt: [`receipts/deploy-2026-08-03.json`](receipts/deploy-2026-08-03.json)
+
+| contract | address |
+|---|---|
+| ShieldedPool | `0xeC41Dd059d2CfDa55FAB3680E599D4af3aF4ad8f` |
+| Collateral (MockERC20) | `0xF7DE25a5D8be39fEE780f4AeDCb484E6533943E0` |
+| PoseidonT3 | `0x0Ac1AccBC1e56CC4DB29A0748F2801e03614128A` |
+| Vault (plaintext, market 7) | `0x8297e65af2e2E663dcCcF7139379F6dc876d319A` |
+| Vault (encrypted, market 8) | `0xed76E3f65285b70f5E9d710952b5e0A85db215DA` |
+| Vault (oracle, market 10) | `0x0D2b7d42196c7481cF5eC072b6e69EbF8f6b9f69` |
+| DepositVerifier | `0x2b49EcC20e45F50fF737d839f6a4FEc13432057d` |
+| BetVerifier | `0x1F8cbcB038C89D9215A45ebAeFd2f0Bfe90b490B` |
+| BetEncryptedVerifier | `0xa7e15d73c7eF76588E96BE7CE5038D95728Ccb4D` |
+| RedeemPrivateVerifier | `0xFd0C72ED022aFeb84464346F840D891D7870493f` |
+| WithdrawVerifier | `0x7dD72a213CC60d4Bdb1CDD704bA11eE75722366B` |
+| PythResolver | `0xe906410566ad77B24335aB89587c5781a0bBBd92` |
+| IncrementalMerkleTree | `0x1B8C8f2BC6044060AdbF99210C2D8e1e0fBBCC58` |
+| ParimutuelPool | `0xfc7Cf04ef1A59AD3F933f87100AF3e91Df8Bda82` |
+| ElGamalAccumulator | `0xdFa6c5da9729F4BA7a03BaFDcd4FC65E8142853f` |
+| EncryptedParimutuelPool | `0x46bbe79a03558963D58221cAD8c11f09e1063c9b` |
+| MappingNullifierSet | `0xB0389B3590F29a542b1fC23503B412B92276d164` |
+
+Three additional markets registered on top via `circuits/scripts/create-market.mjs` (fixed this
+session to target `atrum-markets/markets.json` with the right schema — it previously wrote to
+the wrong sibling repo): id 40 (BTC), 41 (ETH), 42 (SOL), all oracle-resolved via the
+`PythResolver` above, all 7-day windows. See `atrum-markets/markets.json`.
+
+**Outstanding**: the sequencer's Render deployment (`atrum-core.onrender.com`) needs its own
+`POOL_ADDRESS` env var updated to this pool and restarted — that's an external service this
+session could not reach. `atrum-core/sequencer/.env` (local, not what Render runs) was also
+found already stale/disconnected before this redeploy (see its own updated comment).
+
+## SUPERSEDED — `0x26969270fFB9c0b8307abB4b8a14057DA9C50Fec`, replaced 2026-08-03
+
+`minAnonymitySet = 8` (production value), `minRootAge = 0`, `Vault.MIN_RESOLUTION_GAP = 3
+minutes` (**demo value**, production intent is 1 hour — see `contracts/src/Vault.sol`). Was
+the pool `atrum-client` pointed at; superseded by `0x6BAE039F…` then `0xcF2b2113…` above, and
+now by the current deployment above those.
 
 | contract | address |
 |---|---|
