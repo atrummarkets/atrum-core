@@ -17,35 +17,62 @@
 
 services:
   # ---------------------------------------------------------------------------
-  # Sequencer -- MUST NOT SLEEP.
+  # Sequencer -- MUST NOT SLEEP, and MUST take inbound HTTP.
   #
-  # It serves Merkle paths. While it is down nobody can build a bet proof, so a sleeping
-  # sequencer is a closed market, not a slow one. Hence a worker rather than a free web
-  # service -- though it also exposes HTTP, so a free instance plus an uptime pinger on
-  # /health is a workable trade if $7 is the binding constraint.
+  # It serves Merkle paths (/path) and, if relaying is on, submits actions on a user's
+  # behalf (/relay) -- both called directly by atrum-client's browser code. A Render
+  # Background Worker receives NO inbound network traffic at all, so `type: worker` here
+  # would make the client's every call fail, not just risk a cold start. This has to be
+  # `web`. The free instance type spins a Web Service down after 15 minutes idle, which
+  # for this service is a closed market, not a slow one -- hence a paid instance type
+  # (any of them; "starter" is the cheapest that never spins down), not a free one.
   # ---------------------------------------------------------------------------
-  - type: worker
+  - type: web
     name: atrum-sequencer
     runtime: node
     plan: starter
     rootDir: sequencer
-    buildCommand: npm ci
+    buildCommand: npm ci && npm run build
     startCommand: npm run start:sequencer
     healthCheckPath: /health
     envVars:
+      # Highest-priority way to pin the runtime (above .node-version/.nvmrc/engines, per
+      # Render's own resolution order) -- needed for --experimental-strip-types below.
+      # sequencer/.node-version also sets this for local `nvm`/`fnm` use; kept here too
+      # because Render's docs do not confirm .node-version is honoured under a custom
+      # rootDir, and NODE_VERSION unambiguously is.
+      - key: NODE_VERSION
+        value: "24"
       - key: NETWORK
         value: testnet
       - key: POOL_ADDRESS
         sync: false
-      # Without this the first resync starts at genesis. Monad's public RPC caps
-      # eth_getLogs at a 100-block range, so that is thousands of requests.
-      - key: DEPLOY_BLOCK
-        sync: false
       # Pays gas only. Never the committee key.
       - key: RELAYER_MNEMONIC
         sync: false
-      # The public endpoint rate-limits hard. Point this at a private one before real use.
+      # The public endpoint rate-limits hard and lies about balances on writes
+      # (measured, see src/chains.ts) -- point this at a private RPC before real use.
       - key: RPC_URL
+        sync: false
+      - key: MAX_BATCH_DELAY_MS
+        value: "60000"
+      # Restrict once atrum-client has a fixed origin; "*" is fine for a public demo.
+      - key: CORS_ORIGIN
+        value: "*"
+      # Relaying is opt-in: unset (or absent) means every user submits their own
+      # transactions and their address goes on chain next to every action. Set this to
+      # turn it on -- a mnemonic separate from RELAYER_MNEMONIC on purpose, so the
+      # sequencer's onlySequencer-authorised account is never also the address every
+      # relayed action traces to.
+      - key: RELAY_MNEMONIC
+        sync: false
+      - key: RELAY_ACCOUNTS
+        value: "5"
+      - key: RELAY_RELEASE_INTERVAL_MS
+        value: "5000"
+      # Unset disables the gas top-up entirely. In wei; e.g. "20000000000000000" = 0.02
+      # native token, sent to a withdraw's recipient in the same relayed batch.
+      - key: RELAY_TOPUP_AMOUNT_WEI
         sync: false
 
   # ---------------------------------------------------------------------------
@@ -60,10 +87,12 @@ services:
     runtime: node
     plan: free
     rootDir: sequencer
-    buildCommand: npm ci
+    buildCommand: npm ci && npm run build
     startCommand: npm run start:publisher
     healthCheckPath: /health
     envVars:
+      - key: NODE_VERSION
+        value: "24"
       - key: NETWORK
         value: testnet
       - key: POOL_ADDRESS
