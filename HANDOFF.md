@@ -13,10 +13,91 @@ Written to be read by someone who has not seen the earlier conversation.
 that document's §4 for what changed and, more importantly, for the two places its own plan
 turned out not to be implementable.
 
-**Live deployment: pool `0x5EaB8063fB060012c550b29E7321d79b6740773c`** (Monad testnet), with
-`minAnonymitySet = 2` and `minRootAge = 120`. Both are immutable and readable on chain, and
-**2 is a TEST value** — production intent is 8. Anyone can tell which kind of deployment they
-are looking at without trusting what the operator says about it.
+**Live deployment: pool `0x26969270fFB9c0b8307abB4b8a14057DA9C50Fec`** (Monad testnet), with
+`minAnonymitySet = 8` and `minRootAge = 0`. `Vault.MIN_RESOLUTION_GAP` on this deployment is
+**3 minutes, not the 1-hour production value** — shortened for demo iteration
+(`contracts/src/Vault.sol`), immutable and readable on chain like every other test-vs-production
+constant here. Both prior pools this session (`0x5EaB8063…`, then `0xE9ea2115…`) are orphaned.
+Evidence collected live via `atrum-client/scripts/live-loop.mjs` and a scoped variant of it
+(`live-loop-scoped.mjs`, added to target one note among the many the persistent test profile
+accumulates across pools):
+
+**This pool** (fast resolution gap, manual-resolver market 11, no Pyth dependency — deployed
+directly with `forge create` + `registerEncryptedMarket` rather than `create-market.mjs`, whose
+oracle path always adds its own ~61-minute margin regardless of `MIN_RESOLUTION_GAP`):
+
+| what | evidence |
+|---|---|
+| 8 real deposits, `minAnonymitySet = 8` cleared | `totalDeposits` 8, e.g. tx `0x018039bd6ac423c2b3778ddb78d9419eda319a046684a5c09828395d037237cd` |
+| bet relayed, YES | tx `0x6f3351cd6a73644b30f235d3eb9be02510123659c75ad4c1986eb103696d4f71` |
+| manual resolve (`vault.resolve(Yes)`, resolver = deployer EOA, no oracle) | tx `0x9b737f7e32d240d7ff0ae145da12d51cc883d770f923737b2cba821e0a8179c6` |
+| settle (`publishFinalTotals`, YES=100 NO=0) | tx `0xc46f931f640619bf01a08abe819ff6b1f43c43e3871af5cfcd5fe792064b8b08` |
+| `redeemPrivate`, relayed | tx `0x017dab4b85b45c5ad289dee63b4f64102b6026c0a09f0f34e29e151eaa08fe9e` |
+| **settled-payout withdrawal to a fresh address**, `unbetExit = 0`, 100 units | tx `0xa89b1ec904734054d2b49b4f253a537714634e1d5306359fc7a7665ca89bb04f` — recipient `0x31442C829404F8219b259c314479bBeB9C8f56e9` balance confirmed `100000000` (exactly 100 × `DENOM`) via `cast call balanceOf` |
+| **wall-clock time, market creation to settled withdrawal in hand** | **12.6 minutes**, not 61+ |
+
+**Part 4 — relayer gas top-up, live** (`sequencer/src/relay.ts`). Not exercised by any deployment
+until now; every earlier evidence row above ran with `RELAY_TOPUP_AMOUNT_WEI` unset. Restarted
+the sequencer with it set to `0.02` MON, withdrew to a fresh address confirmed at **zero balance
+in both assets before the call**: `unbetExit = 1` withdraw of 100 units, sender
+`0x6384693344164A0dF1ec2b7fEff0E89Dc10c5e96` (a relay-pool account, not the depositor).
+Recipient `0x09ab1BA3E9606a1aA3a2AA4dd6fda850Bb819aea` afterward held USDC `100000000` (the
+withdrawal, block 50465803) **and** MON `20000000000000000` (the top-up, block 50465808, same
+sender, 5 blocks later — the "same account, rides the same batch" property the design calls
+for, confirmed from raw block data, not trusted from client logs). One relay account needed a
+manual top-up (from the deployer, 3 MON) mid-test — `ACTION_GAS_LIMIT` is billed at the full
+declared 2,500,000 gas regardless of usage, and a relay account depletes fast at ~0.5 MON per
+action; whatever runs this in production needs to watch relayer balances, this session did not.
+
+**Same pool, market 12** — pushed further: a ~2-3 minute betting window against the same
+3-minute `MIN_RESOLUTION_GAP`, reusing one of the 8 deposits already on the pool (no re-bootstrap
+needed once `minAnonymitySet` is cleared once). Bet landed with seconds to spare before
+`bettingCloseTime`.
+
+| what | evidence |
+|---|---|
+| bet relayed, YES, market 12 | tx `0x780d78d328ff4950c6ae1c6ff57fdf0e77cb2fad86de70481f82ca2fa703c676` |
+| manual resolve + settle | resolve tx `<not captured — RPC was flaking at the time, see below>`, settle tx `0x3db68a8904501b4226f0114540a4f3a21617d0f61687404931c5d7a4229821ac` |
+| settled-payout withdrawal to a fresh address, 100 units | recipient `0x3e14F3074E4b603ad8e883Ec453F6225A3dF3f06` balance confirmed `100000000` via `cast call balanceOf` |
+
+**What actually happened getting there, worth recording.** The Monad testnet RPC (both
+`testnet-rpc.monad.xyz` and Ankr's endpoint) had a genuinely flaky stretch mid-session —
+`fetch failed` on the sequencer's chain calls, one `forge script` deploy that hung 16 minutes
+sending nothing and had to be killed. Under that flakiness, a `redeemPrivate` relay attempt
+returned an HTTP 500 but the client had already PERSISTED its payout note locally (by design —
+see the ordering note at the top of `app.js`), so `atrum-client` status showed a "withdrawable"
+note that had never actually reached the chain. Retrying blind against that produced a second,
+genuinely-different payout note; only one nullifier-spend can ever land, so exactly one of the
+two was real. Diagnosed by reading `queuedCount`/`pendingCommitments` directly off the pool
+contract rather than trusting client-local state, which is the general lesson: **under relay
+flakiness, treat the client's local note DB as an intent log, not a settled record — verify
+against the chain before trusting a "withdrawable" row.** Nothing here is a contract or circuit
+bug; the nullifier uniqueness check did exactly its job.
+
+**Prior pool** (`0xE9ea2115…`, same code, orphaned when this one replaced it) — the unbet-exit
+half of the fix, and the deposit/bet hedge pattern this pool's test reused:
+
+| what | evidence |
+|---|---|
+| 8 real deposits, clearing `minAnonymitySet = 8` for real (not the K=2 test value) | `totalDeposits` 8, e.g. tx `0x5d43e0ae27a7a47f21dc5772b6bd67e833d571e7d0bbdf3d85261b6ea6fb7f6a` |
+| bet relayed (both sides, market 12, hedged since ETH was trading well under the $2,000 threshold) | YES `0x33efee50ba28e2df3548acc0f9314d30c68c88fe8a008b9dd226a3c0da2f55af`, NO `0xd3943d30150caf4191507a6cd73313ea5433c66f5b93705be47be4a8a705caee` |
+| **the actual fix**: unbet-exit withdrawal to a fresh address the depositing wallet never controlled, 100 units, `unbetExit = 1` | tx `0x1c045728f6a1d3c0312653704c1479b7788422c8d6c4418843d741addc310509` — recipient `0x473BD751B9be69CB75cfF946730A6bDB4c312181` balance confirmed `100000000` (exactly 100 × `DENOM`), an address that never signed or received anything else |
+| settled-payout path (`unbetExit = 0`) on market 12 | queued in a background script against this pool's sequencer, which was stopped when the pool above replaced it — that script's later steps will fail with a sequencer-unreachable error; superseded by this pool's own settled-payout row above, not worth re-running |
+
+The 8-deposit runs also incidentally re-verified the Part 3 default-amount nudge: an unscoped
+withdraw against a 100-unit note defaulted to 10 (the largest rung strictly below it) and was
+correctly refused by `DenominationTooRare` — nobody had withdrawn exactly 10 on that pool yet.
+
+**The exit-correlation leak, and the fix.** Every winner who withdrew was deanonymising
+themselves regardless of how private the bet was: `_checkRedeemMeta` means only winners ever
+reach `withdraw`, and `withdrawData` used to pack the full `marketId` as a public signal — so
+a winner's withdrawal publicly named the market they won in. Fixed by narrowing that field to
+a 1-bit `unbetExit` flag (`ShieldedPool._unpackWithdrawData`, `withdraw.circom`). Cost: the
+settled-payout branch of `_checkWithdrawable` no longer has a `marketId` to check
+`marketVault`/`encryptedMarket`/`settled` against, so it checks nothing — every settled
+withdrawal now trusts a two-circuit reachability argument with no independent on-chain check
+at the moment collateral leaves. The client also gained a fresh-recipient-address withdraw
+field and a partial-withdrawal default nudge (`atrum-client/app.js`), both client-only.
 
 ### What is verified live, with transaction hashes
 

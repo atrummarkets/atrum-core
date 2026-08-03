@@ -63,11 +63,89 @@ elsewhere and the failure mode is worth being able to look up.
 | PythResolver | `0x9f12dF52CeA11F168E523E3f050bE310051683Fd` |
 | Vault (oracle, market 10) | `0xf6057FBbCE7287Fc808a2692EB1F8db81cc8Ce53` |
 
+## SUPERSEDED — `0x5Ede6585…`, replaced 2026-08-02
+
+Was "current deployment" (redeployed after the stale-committee-key fix, see bug #2 above).
+Superseded by two further redeploys the same day, neither a bugfix to THIS pool's design —
+each shipped new work and orphaned the pool before it, same as every entry above:
+
+- `0xE9ea2115857AdaC75D7baE98723Ae2D8dDd6a325` — closed the exit-correlation leak
+  (`withdrawData` no longer packs `marketId`, only a 1-bit `unbetExit`; see `HANDOFF.md`).
+- `0x26969270fFB9c0b8307abB4b8a14057DA9C50Fec` — the current deployment, below. Same fix,
+  redeployed again only to shorten `Vault.MIN_RESOLUTION_GAP` for demo iteration.
+
+Full address tables for the intermediate `0xE9ea2115…` pool were not preserved here since it
+lived for under an hour; its transaction evidence is in `HANDOFF.md` instead.
+
+| contract | address |
+|---|---|
+| ShieldedPool | `0x5Ede6585Ed62745E9b1a6b2F0c2Dd2e1ff5798a6` |
+| Vault (plaintext, market 7) | `0xc9b62Ff3Ca454a31f7107EDc5CA013c713f5eA4B` |
+| Vault (encrypted, market 8) | `0xC8Fb2D2fdBC4D23bf6b5d9CBb6131508577b173a` |
+| Collateral (MockERC20) | `0x1f1a3Ff6B84DB67FEfFf56657F009111B9141d06` |
+| Vault (oracle, market 10) | `0xFd44DaD39872e78D1E95b33a25A928922f17021F` |
+| DepositVerifier | `0xA7c512e81963a4907AF5729EabC4Ddf321205Cde` |
+| BetVerifier | `0x80579ea4fD9c950dA33FA6ceb45268A916b769b3` |
+| BetEncryptedVerifier | `0xb6Df0585Fa15bfa0c942D8C175532CDbc3104fb3` |
+| RedeemPrivateVerifier | `0x48bC46944636998A3138A908e552c0F181d37346` |
+| WithdrawVerifier | `0x372712995Fc96F259dE6E1A6f74F06B10E6A6063` |
+| PythResolver | `0xD26849874d9cc6cC85Ceb18b7BC039F382FBFCa6` |
+| IncrementalMerkleTree | `0x4E02Ac48f4701AD7f51682a9E50FA60a1AaaFEb0` |
+| ElGamalAccumulator | `0x1C1C3974d35304396cDD93136bfAD06b13E65AB3` |
+| MappingNullifierSet | `0xE0E119dEcaba161783A4dbE8DB59263326287829` |
+
 ## Current deployment
 
-`ShieldedPool` **`0x5Ede6585Ed62745E9b1a6b2F0c2Dd2e1ff5798a6`** — redeployed 2026-08-02
-against the circuits on disk after the stale-committee-key fix. This is the pool
+`ShieldedPool` **`0x26969270fFB9c0b8307abB4b8a14057DA9C50Fec`** — 2026-08-02. `minAnonymitySet
+= 8` (production value), `minRootAge = 0`, `Vault.MIN_RESOLUTION_GAP = 3 minutes` (**demo
+value**, production intent is 1 hour — see `contracts/src/Vault.sol`). This is the pool
 `atrum-client` points at.
+
+| contract | address |
+|---|---|
+| ShieldedPool | `0x26969270fFB9c0b8307abB4b8a14057DA9C50Fec` |
+| Collateral (MockERC20) | `0x1Ad5156be89796791fa2ba51e6FFD27a0bC8a3c7` |
+| Vault (plaintext, market 7) | `0xb74DAf3e3eF4248cb8B2D715817a3F71AFeD8Be0` |
+| Vault (encrypted, market 8) | `0x6fD569780424409d82F9Ce7CfD9A5877dB230b9c` |
+| Vault (oracle, market 10) | `0x71AbAA631D31593757EBfBc280bb784E10796Edc` |
+| DepositVerifier | `0xB448EC9058eB610eFFCAC8874BEd347Fdf5729A3` |
+| BetVerifier | `0x0F9F989bB6C15b20F3B91744da00729Cf7e6c1C0` |
+| BetEncryptedVerifier | `0x1D87EaD6C12bEeF8638C357FA6BC8Cb43f874bc1` |
+| RedeemPrivateVerifier | `0x36C51A681B0605cc752Ea16cd60c32dC7b954a7C` |
+| WithdrawVerifier | `0xdcea81898194fc88586C5C9B13A34273f71F8F61` |
+| PythResolver | `0x061A8a9FF32580b2995db794D2de2BE3f84067cD` |
+| IncrementalMerkleTree | `0xF0541A7C8431c2ba396f3Aa41c61130de2f9a517` |
+| ParimutuelPool | `0x2FD7E039748d1D798Bdf18c43FA2F0854902D1d7` |
+| ElGamalAccumulator | `0x7616a4Ecd067DeDC2afCfD24010F6a4Ec54d7243` |
+| EncryptedParimutuelPool | `0xBf6839170f26d3bEfB60F31CA8C630F035a82E76` |
+| MappingNullifierSet | `0xf3380b510B50D0F6937cD5d00da0866f302a0492` |
+
+`make verify-deployment POOL=0x26969270fFB9c0b8307abB4b8a14057DA9C50Fec`:
+
+```
+DEPLOYMENT OK
+  pool                : 0x26969270fFB9c0b8307abB4b8a14057DA9C50Fec
+  encryptedTotals     : 0xBf6839170f26d3bEfB60F31CA8C630F035a82E76
+  committee key       : matches circuits/build/committee-key.json
+  legacy markets      : frozen
+  exit path           : bound
+  oracle market 10 resolver is a contract
+```
+
+Verifier bytecode checked the same way as the entries above — `cast code <verifier> |
+sha256sum` against `forge inspect <Name> deployedBytecode | sha256sum`. Four of five matched
+byte-for-byte (`BetVerifier`, `BetEncryptedVerifier`, `RedeemPrivateVerifier`,
+`WithdrawVerifier`). **`DepositVerifier` did not match** despite deposits working correctly on
+this pool in eight separate real transactions this session — read as a stale local build
+artifact rather than a live problem, but not chased further; re-run the check before trusting
+it blindly.
+
+**[MEASURED] Confirmed with real transactions, not just an invariant check**: 8 real deposits
+of 100 units each landed, e.g.
+`0x018039bd6ac423c2b3778ddb78d9419eda319a046684a5c09828395d037237cd` (block 50338023, gas
+1,221,564 for the first, ~1,135,4xx for the rest once the approval was already granted). Full
+lifecycle — bet, resolve, settle, redeem, withdraw, including the relayer gas top-up — is in
+`HANDOFF.md` with its own transaction table.
 
 | contract | address |
 |---|---|
