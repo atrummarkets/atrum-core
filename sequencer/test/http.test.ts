@@ -12,8 +12,13 @@ import type { AddressInfo } from "node:net";
 import { createPathHandler } from "../src/main.ts";
 
 /** Minimal stand-in for the Sequencer, holding one known commitment at index 3. */
+const LEAVES = [10n, 11n, 12n, 99n, 14n, 15n, 16n];
 const fake = {
-  tree: { size: 7, root: () => 12345n },
+  tree: {
+    size: 7,
+    root: () => 12345n,
+    leavesFrom: (start = 0) => LEAVES.slice(start),
+  },
   pathFor(commitment: bigint) {
     if (commitment !== 99n) throw new Error("commitment not found in the mirror");
     return {
@@ -110,6 +115,59 @@ describe("CORS", () => {
       expect(res.status).toBe(204);
       expect(res.headers.get("access-control-allow-origin")).toBe("*");
       expect(res.headers.get("access-control-allow-methods")).toContain("GET");
+    });
+  });
+});
+
+/**
+ * `/leaves` exists so a client never has to name the commitment it is spending. These check
+ * the mechanics; the privacy property itself is asserted in atrum-markets' client suite,
+ * which verifies no path lookup leaves the browser at all.
+ */
+describe("GET /leaves", () => {
+  it("serves the whole leaf set with the current root", async () => {
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/leaves`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.total).toBe(7);
+      expect(body.since).toBe(0);
+      expect(body.root).toBe("12345");
+      expect(body.leaves).toEqual(["10", "11", "12", "99", "14", "15", "16"]);
+    });
+  });
+
+  it("returns only the tail when the client has already synced", async () => {
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/leaves?since=5`)).json();
+      expect(body.since).toBe(5);
+      expect(body.total).toBe(7);
+      expect(body.leaves).toEqual(["15", "16"]);
+    });
+  });
+
+  it("returns an empty tail rather than an error once fully synced", async () => {
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/leaves?since=7`)).json();
+      expect(body.leaves).toEqual([]);
+      expect(body.total).toBe(7);
+    });
+  });
+
+  it("rejects a nonsense since rather than serving the whole tree", async () => {
+    await withServer(async (base) => {
+      expect((await fetch(`${base}/leaves?since=-1`)).status).toBe(400);
+      expect((await fetch(`${base}/leaves?since=abc`)).status).toBe(400);
+    });
+  });
+
+  it("serves leaves as decimal strings, not JSON numbers", async () => {
+    // Field elements exceed Number.MAX_SAFE_INTEGER; a numeric encoding would silently
+    // round them and every path built from the result would be wrong.
+    await withServer(async (base) => {
+      const raw = await (await fetch(`${base}/leaves`)).text();
+      expect(raw).toContain('"10"');
+      expect(raw).not.toMatch(/"leaves":\[\d/);
     });
   });
 });

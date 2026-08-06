@@ -21,7 +21,7 @@ import type { Address, PublicClient } from "viem";
 
 /** The subset of Sequencer the HTTP surface touches, so the handler can be tested alone. */
 interface PathSource {
-  tree: { size: number; root(): bigint };
+  tree: { size: number; root(): bigint; leavesFrom(start?: number): bigint[] };
   pathFor(commitment: bigint): {
     index: number;
     root: bigint;
@@ -169,10 +169,43 @@ export function createPathHandler(
       return;
     }
 
+    /**
+     * The leaf set, so a client can build its own Merkle paths.
+     *
+     * THIS EXISTS TO CLOSE A CORRELATION CHANNEL. `/path?commitment=X` answers a question that
+     * names the note the caller is about to spend -- a Merkle proof carefully hides WHICH leaf
+     * was spent, and then the lookup that produced it says so out loud. A client that holds
+     * the leaves derives the same path offline and asks nothing.
+     *
+     * Everything served here is already on chain in `flushBatch` calldata, so this publishes
+     * no state; it only makes public state cheap to obtain. `?since=N` returns leaves from
+     * index N so a client that already synced re-fetches only the tail.
+     *
+     * The response is uniform across callers by construction -- every client asks for the same
+     * list -- which is the property `/path` cannot have.
+     */
+    if (url.pathname === "/leaves") {
+      const since = Number(url.searchParams.get("since") ?? "0");
+      if (!Number.isInteger(since) || since < 0) {
+        res.writeHead(400, json).end('{"error":"since must be a non-negative integer"}');
+        return;
+      }
+      const leaves = sequencer.tree.leavesFrom(since);
+      res.writeHead(200, json).end(
+        JSON.stringify({
+          since,
+          total: sequencer.tree.size,
+          root: sequencer.tree.root().toString(),
+          leaves: leaves.map(String),
+        }),
+      );
+      return;
+    }
+
     if (url.pathname !== "/path") {
       res
         .writeHead(404, json)
-        .end('{"error":"only /health and /path?commitment=0x... are served"}');
+        .end('{"error":"only /health, /leaves and /path?commitment=0x... are served"}');
       return;
     }
 

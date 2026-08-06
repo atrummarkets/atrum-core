@@ -159,6 +159,25 @@ export class CommitmentTree {
   }
 
   /**
+   * Leaves from `start` onward, for clients that build their own paths.
+   *
+   * Every leaf here is already public: each was grafted by a `flushBatch` transaction whose
+   * calldata is on chain, and fillers are derived deterministically by the contract itself.
+   * Serving them reveals nothing new -- it only saves a client from reconstructing the set
+   * out of `eth_getLogs`, which the 100-block cap on the public RPC makes impractical anyway.
+   *
+   * Why a client would want them: asking this service for ONE commitment's path announces
+   * exactly which note is about to be spent. A client holding the leaf set derives that path
+   * offline and announces nothing. See atrum-markets' `client/tree.ts`.
+   *
+   * Copied, not exposed by reference -- `leaves` is private precisely so nothing outside can
+   * push onto it and desynchronise the mirror from the contract.
+   */
+  leavesFrom(start = 0): bigint[] {
+    return this.leaves.slice(start);
+  }
+
+  /**
    * Drop every leaf.
    *
    * `resync` rebuilds from chain state, and rebuilding onto a non-empty mirror would
