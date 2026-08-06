@@ -29,6 +29,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { ethers } from "ethers";
+import { registerWithApp } from "./lib/register-market.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RPC = process.env.RPC_URL ?? "https://testnet-rpc.monad.xyz";
@@ -210,6 +211,16 @@ async function main() {
   registry.markets.sort((a, b) => a.id - b.id);
   writeFileSync(REGISTRY_PATH, `${JSON.stringify(registry, null, 2)}\n`);
   console.log(`recorded in ${REGISTRY_PATH}`);
+
+  // The file is now only a local record and a backfill source -- atrum-markets reads its
+  // registry from Postgres. This is what actually makes the market visible.
+  // Looked up by id, not `.at(-1)`: both scripts sort the array after pushing, so the
+  // last element is the highest id, which is not necessarily the one just created.
+  await registerWithApp(
+    process.env.APP_URL,
+    wallet,
+    registry.markets.find((m) => m.id === marketId),
+  );
 }
 
 main().catch((e) => {
