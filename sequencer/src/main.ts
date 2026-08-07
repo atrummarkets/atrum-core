@@ -21,7 +21,7 @@ import type { Address, PublicClient } from "viem";
 
 /** The subset of Sequencer the HTTP surface touches, so the handler can be tested alone. */
 interface PathSource {
-  tree: { size: number; root(): bigint };
+  tree: { size: number; root(): bigint; leavesFrom(start?: number): bigint[] };
   pathFor(commitment: bigint): {
     index: number;
     root: bigint;
@@ -32,6 +32,8 @@ interface PathSource {
 /** The subset of Relayer the HTTP surface touches -- same reason as PathSource. */
 interface RelaySink {
   submit(action: RelayableAction, args: readonly unknown[]): Promise<RelayResult>;
+  /** The rotating relayer accounts, so their funding can be monitored from outside. */
+  readonly addresses: readonly `0x${string}`[];
 }
 
 /**
@@ -113,13 +115,15 @@ export function createPathHandler(
   sequencer: PathSource,
   corsOrigin = "*",
   relayer?: RelaySink,
+  /** Injected so /relayers is testable without an RPC connection. */
+  balanceOf?: (address: `0x${string}`) => Promise<bigint>,
 ) {
   const json = {
     "content-type": "application/json",
     "access-control-allow-origin": corsOrigin,
   };
 
-  return (req: IncomingMessage, res: ServerResponse): void => {
+  return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? "/", "http://localhost");
 
     if (req.method === "OPTIONS") {
@@ -169,10 +173,79 @@ export function createPathHandler(
       return;
     }
 
+    /**
+     * The leaf set, so a client can build its own Merkle paths.
+     *
+     * THIS EXISTS TO CLOSE A CORRELATION CHANNEL. `/path?commitment=X` answers a question that
+     * names the note the caller is about to spend -- a Merkle proof carefully hides WHICH leaf
+     * was spent, and then the lookup that produced it says so out loud. A client that holds
+     * the leaves derives the same path offline and asks nothing.
+     *
+     * Everything served here is already on chain in `flushBatch` calldata, so this publishes
+     * no state; it only makes public state cheap to obtain. `?since=N` returns leaves from
+     * index N so a client that already synced re-fetches only the tail.
+     *
+     * The response is uniform across callers by construction -- every client asks for the same
+     * list -- which is the property `/path` cannot have.
+     */
+    if (url.pathname === "/leaves") {
+      const since = Number(url.searchParams.get("since") ?? "0");
+      if (!Number.isInteger(since) || since < 0) {
+        res.writeHead(400, json).end('{"error":"since must be a non-negative integer"}');
+        return;
+      }
+      const leaves = sequencer.tree.leavesFrom(since);
+      res.writeHead(200, json).end(
+        JSON.stringify({
+          since,
+          total: sequencer.tree.size,
+          root: sequencer.tree.root().toString(),
+          leaves: leaves.map(String),
+        }),
+      );
+      return;
+    }
+
+    /**
+     * Relayer accounts and what they hold.
+     *
+     * EXISTS BECAUSE THESE ACCOUNTS SILENTLY STOP THE PRODUCT. `ACTION_GAS_LIMIT` bills the
+     * full declared 2,500,000 whether an action uses it or not -- about 0.5 MON each -- so a
+     * relay account drains fast, and when it does every bet and every redemption fails with
+     * "Signer had insufficient balance". Nothing on chain says why. This has now happened
+     * repeatedly, each time diagnosed by hand from a failed user action.
+     *
+     * Addresses are already public: every relayed transaction carries one as `from`. Balances
+     * are public too. Serving them reveals nothing and makes the failure predictable instead
+     * of forensic.
+     *
+     * Balances are read live rather than cached -- a monitor acting on a stale balance is
+     * worse than no monitor.
+     */
+    if (url.pathname === "/relayers") {
+      if (!relayer || !balanceOf) {
+        res.writeHead(200, json).end(JSON.stringify({ relaying: false, accounts: [] }));
+        return;
+      }
+      try {
+        const accounts = await Promise.all(
+          relayer.addresses.map(async (address) => ({
+            address,
+            balanceWei: (await balanceOf(address)).toString(),
+          })),
+        );
+        res.writeHead(200, json).end(JSON.stringify({ relaying: true, accounts }));
+      } catch (error) {
+        // An RPC hiccup must not read as "no relayers" -- a monitor would call that healthy.
+        res.writeHead(503, json).end(JSON.stringify({ error: (error as Error).message }));
+      }
+      return;
+    }
+
     if (url.pathname !== "/path") {
       res
         .writeHead(404, json)
-        .end('{"error":"only /health and /path?commitment=0x... are served"}');
+        .end('{"error":"only /health, /leaves, /relayers and /path?commitment=0x... are served"}');
       return;
     }
 
@@ -230,12 +303,16 @@ async function main(): Promise<void> {
   // should not also be the address every user action traces to.
   const relayMnemonic = process.env.RELAY_MNEMONIC;
   let relayer: Relayer | undefined;
+  // Hoisted out of the block below so /relayers can read balances. Left undefined when
+  // relaying is off, which is exactly when there are no relayer accounts to report.
+  let balanceOf: ((address: `0x${string}`) => Promise<bigint>) | undefined;
 
   if (relayMnemonic) {
     const publicClient = createPublicClient({
       chain,
       transport: http(process.env.RPC_URL ?? chain.rpcUrls.default.http[0]!),
     }) as PublicClient;
+    balanceOf = (address) => publicClient.getBalance({ address });
 
     relayer = new Relayer({
       rpcUrl: process.env.RPC_URL ?? chain.rpcUrls.default.http[0]!,
@@ -273,10 +350,9 @@ async function main(): Promise<void> {
     console.log("which means their address is on chain next to every action they take");
   }
 
-  createServer(createPathHandler(sequencer, process.env.CORS_ORIGIN ?? "*", relayer)).listen(
-    port,
-    () => console.log(`merkle path endpoint on :${port}`),
-  );
+  createServer(
+    createPathHandler(sequencer, process.env.CORS_ORIGIN ?? "*", relayer, balanceOf),
+  ).listen(port, () => console.log(`merkle path endpoint on :${port}`));
 
   // Poll rather than subscribe. A dropped websocket that silently stops delivering
   // events would stall the queue indefinitely and look healthy; a poll loop that fails
