@@ -29,8 +29,13 @@ const fake = {
   },
 };
 
-async function withServer<T>(fn: (base: string) => Promise<T>, origin?: string): Promise<T> {
-  const server = createServer(createPathHandler(fake, origin));
+async function withServer<T>(
+  fn: (base: string) => Promise<T>,
+  origin?: string,
+  relayer?: Parameters<typeof createPathHandler>[2],
+  balanceOf?: Parameters<typeof createPathHandler>[3],
+): Promise<T> {
+  const server = createServer(createPathHandler(fake, origin, relayer, balanceOf));
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const { port } = server.address() as AddressInfo;
   try {
@@ -124,12 +129,20 @@ describe("CORS", () => {
  * the mechanics; the privacy property itself is asserted in atrum-markets' client suite,
  * which verifies no path lookup leaves the browser at all.
  */
+/** What `/leaves` returns. `Response.json()` is `unknown` here, so the shape is declared. */
+interface LeavesBody {
+  since: number;
+  total: number;
+  root: string;
+  leaves: string[];
+}
+
 describe("GET /leaves", () => {
   it("serves the whole leaf set with the current root", async () => {
     await withServer(async (base) => {
       const res = await fetch(`${base}/leaves`);
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as LeavesBody;
       expect(body.total).toBe(7);
       expect(body.since).toBe(0);
       expect(body.root).toBe("12345");
@@ -139,7 +152,7 @@ describe("GET /leaves", () => {
 
   it("returns only the tail when the client has already synced", async () => {
     await withServer(async (base) => {
-      const body = await (await fetch(`${base}/leaves?since=5`)).json();
+      const body = (await (await fetch(`${base}/leaves?since=5`)).json()) as LeavesBody;
       expect(body.since).toBe(5);
       expect(body.total).toBe(7);
       expect(body.leaves).toEqual(["15", "16"]);
@@ -148,7 +161,7 @@ describe("GET /leaves", () => {
 
   it("returns an empty tail rather than an error once fully synced", async () => {
     await withServer(async (base) => {
-      const body = await (await fetch(`${base}/leaves?since=7`)).json();
+      const body = (await (await fetch(`${base}/leaves?since=7`)).json()) as LeavesBody;
       expect(body.leaves).toEqual([]);
       expect(body.total).toBe(7);
     });
@@ -169,5 +182,88 @@ describe("GET /leaves", () => {
       expect(raw).toContain('"10"');
       expect(raw).not.toMatch(/"leaves":\[\d/);
     });
+  });
+});
+
+/**
+ * `/relayers` is monitoring, not protocol -- it exists because relay accounts drain silently
+ * and take every bet and redemption down with them, with nothing on chain saying why.
+ */
+describe("GET /relayers", () => {
+  const RELAYERS = [
+    "0x1111111111111111111111111111111111111111",
+    "0x2222222222222222222222222222222222222222",
+  ] as const;
+
+  const sink = {
+    submit: async () => {
+      throw new Error("not used");
+    },
+    addresses: RELAYERS,
+  } as unknown as Parameters<typeof createPathHandler>[2];
+
+  interface RelayersBody {
+    relaying: boolean;
+    accounts: { address: string; balanceWei: string }[];
+    error?: string;
+  }
+
+  it("reports each relayer and its balance", async () => {
+    const balances: Record<string, bigint> = {
+      [RELAYERS[0]]: 3_000_000_000_000_000_000n,
+      [RELAYERS[1]]: 140_000_000_000_000_000n,
+    };
+    await withServer(
+      async (base) => {
+        const body = (await (await fetch(`${base}/relayers`)).json()) as RelayersBody;
+        expect(body.relaying).toBe(true);
+        expect(body.accounts).toEqual([
+          { address: RELAYERS[0], balanceWei: "3000000000000000000" },
+          { address: RELAYERS[1], balanceWei: "140000000000000000" },
+        ]);
+      },
+      undefined,
+      sink,
+      async (a) => balances[a]!,
+    );
+  });
+
+  it("says relaying is off rather than pretending there are no accounts", async () => {
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/relayers`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as RelayersBody;
+      expect(body.relaying).toBe(false);
+      expect(body.accounts).toEqual([]);
+    });
+  });
+
+  it("fails loudly when the RPC is down, rather than reporting zero accounts", async () => {
+    // A monitor that reads an RPC outage as "no relayers to worry about" is worse than none.
+    await withServer(
+      async (base) => {
+        const res = await fetch(`${base}/relayers`);
+        expect(res.status).toBe(503);
+        expect(((await res.json()) as RelayersBody).error).toContain("rpc exploded");
+      },
+      undefined,
+      sink,
+      async () => {
+        throw new Error("rpc exploded");
+      },
+    );
+  });
+
+  it("serves balances as decimal strings, not JSON numbers", async () => {
+    // Wei exceeds Number.MAX_SAFE_INTEGER; a numeric encoding would round it.
+    await withServer(
+      async (base) => {
+        const raw = await (await fetch(`${base}/relayers`)).text();
+        expect(raw).toContain('"3000000000000000000"');
+      },
+      undefined,
+      sink,
+      async () => 3_000_000_000_000_000_000n,
+    );
   });
 });
