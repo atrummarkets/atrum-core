@@ -18,6 +18,7 @@ import { Relayer, RelayError, parseRelayRequest } from "./relay.ts";
 import type { RelayableAction, RelayRequest, RelayResult } from "./relay.ts";
 import { createPublicClient, http } from "viem";
 import type { Address, PublicClient } from "viem";
+import { rpcTransport } from "./rpc.ts";
 
 /** The subset of Sequencer the HTTP surface touches, so the handler can be tested alone. */
 interface PathSource {
@@ -310,7 +311,7 @@ async function main(): Promise<void> {
   if (relayMnemonic) {
     const publicClient = createPublicClient({
       chain,
-      transport: http(process.env.RPC_URL ?? chain.rpcUrls.default.http[0]!),
+      transport: rpcTransport(process.env.RPC_URL, chain.rpcUrls.default.http[0]!),
     }) as PublicClient;
     balanceOf = (address) => publicClient.getBalance({ address });
 

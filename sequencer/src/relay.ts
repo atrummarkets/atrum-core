@@ -39,6 +39,7 @@
 import { createWalletClient, http, parseAbi } from "viem";
 import type { Address, Chain, PublicClient, WalletClient } from "viem";
 import { RelayerPool } from "./relayers.ts";
+import { rpcTransport } from "./rpc.ts";
 
 /**
  * The declared gas limit for every relayed action.
@@ -342,7 +343,7 @@ export class Relayer {
     const wallet: WalletClient = createWalletClient({
       account,
       chain: this.config.chain,
-      transport: http(this.config.rpcUrl),
+      transport: rpcTransport(this.config.rpcUrl),
     });
 
     // SIMULATE FIRST. Monad bills the DECLARED gas limit, not the gas used, and every action

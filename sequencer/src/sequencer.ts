@@ -43,6 +43,7 @@ import {
   type MerklePath,
 } from "./tree.ts";
 import { RelayerPool } from "./relayers.ts";
+import { rpcTransport } from "./rpc.ts";
 
 export const POOL_ABI = parseAbi([
   "event CommitmentQueued(uint256 indexed commitment, uint256 queueIndex)",
@@ -98,7 +99,7 @@ export class Sequencer {
     this.relayers = new RelayerPool(config.mnemonic, 1);
     this.publicClient = createPublicClient({
       chain: config.chain,
-      transport: http(config.rpcUrl),
+      transport: rpcTransport(config.rpcUrl),
     }) as PublicClient;
   }
 
@@ -285,7 +286,7 @@ export class Sequencer {
     const wallet: WalletClient = createWalletClient({
       account,
       chain: this.config.chain,
-      transport: http(this.config.rpcUrl),
+      transport: rpcTransport(this.config.rpcUrl),
     });
 
     const hash = await wallet.writeContract({
