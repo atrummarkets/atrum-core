@@ -105,7 +105,9 @@ async function nextMarketId() {
   const res = await fetch(`${APP_URL}/api/atrum/markets`);
   if (!res.ok) die(`GET /api/atrum/markets -> ${res.status}`);
   const { markets } = await res.json();
-  const maxId = markets.reduce((m, x) => Math.max(m, x.id), -1);
+  // The list route's MarketSnapshot names it `marketId` (markets.ts:24), not `id` -- that
+  // field name is specific to RegistryMarket / the admin/markets POST body, a different shape.
+  const maxId = markets.reduce((m, x) => Math.max(m, x.marketId), -1);
   return maxId + 1;
 }
 
