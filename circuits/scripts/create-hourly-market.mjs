@@ -20,11 +20,14 @@
  * Postgres (atrum-markets commit "Move the market registry into Postgres, so creating a
  * market is not a deploy"). `loadRegistry()` only falls back to markets.json when the table
  * has no rows for the pool, so a market written only to the file would be live on chain and
- * invisible in the app. `/api/atrum/admin/markets` is the supported way to add a row without
- * either repo needing the other's DATABASE_URL -- it verifies the vault on chain itself, so a
- * wrong POST body can misregister a market but never misprice one. Getting in requires an
- * operator session, so this signs in exactly the way sweep-markets.mjs already does: a
- * server-issued nonce, personal_sign, cookie.
+ * invisible in the app. Uses the same `lib/register-market.mjs` helper `create-market.mjs`
+ * and `create-manual-market.mjs` now use (see commit "Register new markets with the app over
+ * HTTP, not by rewriting a file") rather than a second copy of the same sign-in flow: it
+ * authenticates as the operator (server-issued nonce, personal_sign, cookie) and POSTs to
+ * `/api/atrum/admin/markets`, which verifies the vault on chain itself before accepting the
+ * row -- a wrong body can misregister a market but never misprice one. Best-effort by that
+ * helper's own design: a POST failure here means the app has not been told, not that anything
+ * on chain broke, so it warns rather than dying and burning the id.
  *
  * IDEMPOTENT ACROSS RETRIES. The market id is `max(existing ids) + 1`, read fresh from the
  * app each run. If a previous run deployed the vault and called registerEncryptedMarket but
@@ -34,7 +37,7 @@
  * on-chain timing is read back, not re-derived) and only the POST is retried.
  *
  * Usage:
- *   PRIVATE_KEY=0x... POOL=0x... MARKETS_BASE_URL=https://markets.atrum.fun \
+ *   PRIVATE_KEY=0x... POOL=0x... APP_URL=https://markets.atrum.fun \
  *     node scripts/create-hourly-market.mjs
  *
  * Env:
@@ -43,7 +46,8 @@
  *                        PRIVATE_KEY -- true on this deployment, where one throwaway key plays
  *                        both roles. If a real deployment splits them, set this explicitly.
  *   POOL                 the ShieldedPool address
- *   MARKETS_BASE_URL     the running atrum-markets app (default https://markets.atrum.fun)
+ *   APP_URL               the running atrum-markets app (default https://markets.atrum.fun).
+ *                         MARKETS_BASE_URL is accepted as an alias.
  *   RPC_URL               default https://testnet-rpc.monad.xyz
  *   REGISTRY              default ../../../atrum-markets/markets.json
  */
@@ -51,12 +55,15 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { ethers } from "ethers";
+import { registerWithApp } from "./lib/register-market.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RPC = process.env.RPC_URL ?? "https://testnet-rpc.monad.xyz";
 const REGISTRY_PATH =
   process.env.REGISTRY ?? join(HERE, "..", "..", "..", "atrum-markets", "markets.json");
-const MARKETS_BASE_URL = (process.env.MARKETS_BASE_URL ?? "https://markets.atrum.fun").replace(/\/$/, "");
+const APP_URL = (
+  process.env.APP_URL ?? process.env.MARKETS_BASE_URL ?? "https://markets.atrum.fun"
+).replace(/\/$/, "");
 
 // Same feed directory as create-market.mjs (verified live against Hermes, not copied from
 // memory -- see that file's comment for how).
@@ -91,35 +98,11 @@ function die(msg) {
 }
 
 async function nextMarketId() {
-  const res = await fetch(`${MARKETS_BASE_URL}/api/atrum/markets`);
+  const res = await fetch(`${APP_URL}/api/atrum/markets`);
   if (!res.ok) die(`GET /api/atrum/markets -> ${res.status}`);
   const { markets } = await res.json();
   const maxId = markets.reduce((m, x) => Math.max(m, x.id), -1);
   return maxId + 1;
-}
-
-/** Sign in the way the browser does -- identical to sweep-markets.mjs's flow. */
-async function signIn(wallet) {
-  const nonceRes = await fetch(`${MARKETS_BASE_URL}/api/atrum/auth/nonce`);
-  if (!nonceRes.ok) die(`auth/nonce -> ${nonceRes.status}`);
-  const { nonce, message } = await nonceRes.json();
-
-  const signature = await wallet.signMessage(message);
-
-  const verifyRes = await fetch(`${MARKETS_BASE_URL}/api/atrum/auth/verify`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ address: wallet.address, nonce, signature }),
-  });
-  if (!verifyRes.ok) {
-    die(`auth/verify -> ${verifyRes.status}: ${JSON.stringify(await verifyRes.json().catch(() => ({})))}`);
-  }
-  const cookie = verifyRes.headers
-    .getSetCookie()
-    .find((c) => c.startsWith("atrum_session="))
-    ?.split(";")[0];
-  if (!cookie) die("no session cookie returned");
-  return cookie;
 }
 
 async function main() {
@@ -271,54 +254,36 @@ async function main() {
   // checked out alone, so the sibling atrum-markets tree (and REGISTRY_PATH) does not exist.
   // Postgres, updated below, is what production actually reads -- this is a convenience for
   // running create-market.mjs / resolve-oracle-market.mjs locally against the same file. ---
+  const marketRecord = {
+    id: marketId,
+    question,
+    category: "Crypto",
+    resolverType: "oracle",
+    vault: vaultAddress,
+    resolver: resolverAddress,
+    bettingCloseTime,
+    resolutionStartTime,
+    createdAt: now,
+    spec,
+  };
+
   try {
     const registry = existsSync(REGISTRY_PATH)
       ? JSON.parse(readFileSync(REGISTRY_PATH, "utf8"))
       : { pool: poolAddress, collateral: "", markets: [] };
     registry.pool = poolAddress;
     registry.markets = registry.markets.filter((m) => m.id !== marketId);
-    registry.markets.push({
-      id: marketId,
-      question,
-      category: "Crypto",
-      resolverType: "oracle",
-      vault: vaultAddress,
-      resolver: resolverAddress,
-      bettingCloseTime,
-      resolutionStartTime,
-      createdAt: now,
-      spec,
-    });
+    registry.markets.push(marketRecord);
     registry.markets.sort((a, b) => a.id - b.id);
     writeFileSync(REGISTRY_PATH, `${JSON.stringify(registry, null, 2)}\n`);
     console.log(`recorded in ${REGISTRY_PATH}`);
   } catch (error) {
-    console.warn(`skipping local markets.json (${error.message}) -- continuing to production POST`);
+    console.warn(`skipping local markets.json (${error.message}) -- continuing to app registration`);
   }
 
-  // --- Postgres, via the app's own API, so it's live immediately. ---
-  console.log(`signing in to ${MARKETS_BASE_URL} as ${operatorWallet.address}…`);
-  const cookie = await signIn(operatorWallet);
-
-  const postRes = await fetch(`${MARKETS_BASE_URL}/api/atrum/admin/markets`, {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie },
-    body: JSON.stringify({
-      id: marketId,
-      question,
-      category: "Crypto",
-      resolverType: "oracle",
-      vault: vaultAddress,
-      resolver: resolverAddress,
-      bettingCloseTime,
-      resolutionStartTime,
-      createdAt: now,
-      spec,
-    }),
-  });
-  const postBody = await postRes.json().catch(() => ({}));
-  if (!postRes.ok) die(`POST /api/atrum/admin/markets -> ${postRes.status}: ${JSON.stringify(postBody)}`);
-  console.log(`registered in production: market ${marketId} -> ${postBody.vault}`);
+  // --- Postgres, via the app's own API, so it's live immediately. Shared helper: same one
+  // create-market.mjs and create-manual-market.mjs use, same best-effort semantics. ---
+  await registerWithApp(APP_URL, operatorWallet, marketRecord);
 }
 
 main().catch((e) => {

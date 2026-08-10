@@ -18,7 +18,7 @@
 #                            admin/markets POST. Falls back to PRIVATE_KEY if unset.
 #     POOL                  the ShieldedPool address
 #   Settings -> Secrets and variables -> Actions -> New repository variable
-#     MARKETS_BASE_URL      e.g. https://markets.atrum.fun (defaults to that if unset)
+#     APP_URL               e.g. https://markets.atrum.fun (defaults to that if unset)
 
 name: Create hourly market
 
@@ -60,5 +60,5 @@ jobs:
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
           OPERATOR_PRIVATE_KEY: ${{ secrets.OPERATOR_PRIVATE_KEY }}
           POOL: ${{ secrets.POOL }}
-          MARKETS_BASE_URL: ${{ vars.MARKETS_BASE_URL }}
+          APP_URL: ${{ vars.APP_URL }}
         run: node scripts/create-hourly-market.mjs
