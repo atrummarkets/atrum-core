@@ -51,9 +51,12 @@ jobs:
           node-version: "22"
 
       # Only ethers is needed -- the script talks to the chain and to the app's HTTP API, both
-      # of which are already covered.
+      # of which are already covered. Pinned to v5: create-hourly-market.mjs uses the same
+      # ethers.providers/ethers.utils/ethers.constants v5 API create-market.mjs does (v6
+      # dropped the `.providers` namespace entirely -- an unpinned install resolves v6 and
+      # fails immediately with "Cannot read properties of undefined (reading 'JsonRpcProvider')").
       - name: Install ethers
-        run: npm install --no-save --no-audit --no-fund ethers
+        run: npm install --no-save --no-audit --no-fund ethers@^5
 
       - name: Create market
         env:
