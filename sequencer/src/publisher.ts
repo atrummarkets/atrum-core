@@ -44,6 +44,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { buildDecryptor, type Decryptor, type Point } from "./elgamal.ts";
 import { decide, DEFAULT_POLICY, type RatioPolicy, type MarketState } from "./ratio-policy.ts";
+import { rpcTransport } from "./rpc.ts";
 
 export const ACCUMULATOR_ABI = parseAbi([
   "function totalAffine(uint32 marketId, uint8 outcome) view returns (uint256 c1x, uint256 c1y, uint256 c2x, uint256 c2y)",
@@ -127,12 +128,12 @@ export class Publisher {
 
     this.publicClient = createPublicClient({
       chain: config.chain,
-      transport: http(config.rpcUrl),
+      transport: rpcTransport(config.rpcUrl),
     }) as PublicClient;
 
     this.walletClient = createWalletClient({
       chain: config.chain,
-      transport: http(config.rpcUrl),
+      transport: rpcTransport(config.rpcUrl),
       account: privateKeyToAccount(config.publisherPrivateKey),
     });
   }

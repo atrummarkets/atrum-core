@@ -85,7 +85,7 @@ describe("parseRelayRequest", () => {
 });
 
 const fakeSequencer = {
-  tree: { size: 0, root: () => 0n },
+  tree: { size: 0, root: () => 0n, leavesFrom: () => [] },
   pathFor: () => {
     throw new Error("not used");
   },

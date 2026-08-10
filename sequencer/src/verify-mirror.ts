@@ -24,6 +24,7 @@ import { createPublicClient, http, parseAbi, type Address } from "viem";
 import { Sequencer } from "./sequencer.ts";
 import { initHasher } from "./tree.ts";
 import { chainFor } from "./chains.ts";
+import { rpcTransport } from "./rpc.ts";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -50,7 +51,7 @@ async function main(): Promise<void> {
   await sequencer.init();
   const elapsed = Date.now() - started;
 
-  const client = createPublicClient({ chain, transport: http(rpcUrl) });
+  const client = createPublicClient({ chain, transport: rpcTransport(rpcUrl) });
   const tree = (await client.readContract({
     address: pool,
     abi: parseAbi(["function tree() view returns (address)"]),
