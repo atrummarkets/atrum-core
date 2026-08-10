@@ -1,0 +1,64 @@
+# Deploy a new hourly, Pyth-resolved market and register it in production.
+#
+# WHY THIS EXISTS. registerEncryptedMarket has no deploy-time restriction -- the pool's admin
+# can add markets for as long as the pool lives -- but something still has to deploy the Vault
+# and call it on a schedule. Resolution is already automated (sweep-markets.yml in
+# atrum-markets, every 5 minutes, hitting the app's own idempotent sweep); this is the other
+# half: creation.
+#
+# Deliberately no Foundry step. create-hourly-market.mjs deploys Vault from a COMMITTED
+# artifact (circuits/scripts/lib/vault-artifact.json) rather than compiling -- Vault.sol has no
+# dependency on the generated circuit verifiers that make the rest of this repo's contracts
+# build slow, so there is nothing here that needs a fresh `forge build`.
+#
+# Setup, once:
+#   Settings -> Secrets and variables -> Actions -> New repository secret
+#     PRIVATE_KEY           the pool admin key -- deploys the Vault, calls registerEncryptedMarket
+#     OPERATOR_PRIVATE_KEY  (optional) the atrum-markets app's operator key, for the
+#                            admin/markets POST. Falls back to PRIVATE_KEY if unset.
+#     POOL                  the ShieldedPool address
+#   Settings -> Secrets and variables -> Actions -> New repository variable
+#     MARKETS_BASE_URL      e.g. https://markets.atrum.fun (defaults to that if unset)
+
+name: Create hourly market
+
+on:
+  schedule:
+    # Top of every hour. Best-effort like sweep-markets.yml's schedule -- Actions delays
+    # scheduled runs under load -- which is fine because create-hourly-market.mjs derives the
+    # next market id from the app at run time rather than assuming a fixed cadence held.
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+# Never let two creations overlap. They share the pool-admin account's nonce, and concurrent
+# transactions from one account race it.
+concurrency:
+  group: create-market
+  cancel-in-progress: false
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: circuits
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Only ethers is needed -- the script talks to the chain and to the app's HTTP API, both
+      # of which are already covered.
+      - name: Install ethers
+        run: npm install --no-save --no-audit --no-fund ethers
+
+      - name: Create market
+        env:
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          OPERATOR_PRIVATE_KEY: ${{ secrets.OPERATOR_PRIVATE_KEY }}
+          POOL: ${{ secrets.POOL }}
+          MARKETS_BASE_URL: ${{ vars.MARKETS_BASE_URL }}
+        run: node scripts/create-hourly-market.mjs
