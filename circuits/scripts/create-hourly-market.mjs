@@ -61,8 +61,12 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const RPC = process.env.RPC_URL ?? "https://testnet-rpc.monad.xyz";
 const REGISTRY_PATH =
   process.env.REGISTRY ?? join(HERE, "..", "..", "..", "atrum-markets", "markets.json");
+// `||`, not `??`: an unset GitHub Actions secret/var interpolates to an EMPTY STRING in the
+// env block (`APP_URL: ${{ vars.APP_URL }}` with no var set), not an absent key -- `??` only
+// falls through on null/undefined, so it would have kept "" and every fetch below would have
+// hit a relative URL.
 const APP_URL = (
-  process.env.APP_URL ?? process.env.MARKETS_BASE_URL ?? "https://markets.atrum.fun"
+  process.env.APP_URL || process.env.MARKETS_BASE_URL || "https://markets.atrum.fun"
 ).replace(/\/$/, "");
 
 // Same feed directory as create-market.mjs (verified live against Hermes, not copied from
@@ -107,7 +111,7 @@ async function nextMarketId() {
 
 async function main() {
   const privateKey = process.env.PRIVATE_KEY;
-  const operatorKey = process.env.OPERATOR_PRIVATE_KEY ?? privateKey;
+  const operatorKey = process.env.OPERATOR_PRIVATE_KEY || privateKey; // see APP_URL's note on || vs ??
   const poolAddress = process.env.POOL;
   if (!privateKey) die("missing PRIVATE_KEY");
   if (!poolAddress) die("missing POOL");
