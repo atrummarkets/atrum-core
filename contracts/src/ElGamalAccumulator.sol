@@ -54,6 +54,21 @@ import {BabyJubJub} from "./BabyJubJub.sol";
 ///        - We then expected MIP-8 page-sharing to explain why extended costs the same on
 ///          both chains. It does not either -- `StorageContiguity.t.sol` measures
 ///          contiguity at only ~2,600 gas, and Monad charges the full per-slot surcharge.
+///
+///      [SUPERSEDED 18 Aug 2026 -- see MEASUREMENTS.md 0.2] That last bullet is wrong ON THE
+///      LIVE CHAIN. `StorageContiguity.t.sol` is a local test; measured live, contiguous
+///      slots cost ~261 gas against ~8,357 scattered, a ~32x discount for adjacency.
+///
+///      THE DECISION BELOW IS UNCHANGED, and was re-measured rather than re-argued. Live
+///      `eth_estimateGas`, same market, same ciphertext, cold slots:
+///
+///        accumulateExtended   149,151
+///        accumulateAffine     123,722   <- still wins, by 25,429
+///
+///      A derivation from the contiguity result predicted extended would win and was wrong:
+///      the flat-array measurement does not transfer to a struct at a keccak-derived base
+///      inside a nested mapping. The shape under which the discount applies is NOT
+///      established. Do not re-open this from a probe -- measure this contract.
 ///          The real explanation was a flawed measurement: `initMarket` had warmed the
 ///          slots before the "cold" figure was taken.
 contract ElGamalAccumulator {
