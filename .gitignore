@@ -80,3 +80,8 @@ circuits/ceremony/
 
 # OS
 .DS_Store
+
+# V2 probe compile artefacts -- regenerable, and build/fee holds a zkey
+circuits/build/bind/
+circuits/build/fee/
+circuits/build/route/

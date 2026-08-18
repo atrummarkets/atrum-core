@@ -4,13 +4,15 @@ Everything here was measured by this repo's own tooling against **live Monad nod
 on 30 July 2026, not copied from `nisi-master-reference.md`. Where our number
 disagrees with the reference, both are shown and the disagreement is called out.
 Where a later measurement corrected an earlier claim *in this file*, that is called
-out too — see the [CORRECTION] blocks in §1b and §3.
+out too — see the [CORRECTION] blocks in §1b and §3, and **§0 for the V2 corrections
+of 18 August 2026, which change how several figures below must be read.**
 
 Labels follow the reference's convention:
 
 | Label | Meaning |
 |---|---|
 | **[MEASURED]** | We ran it. Reproduce with the command given. |
+| **[SUPERSEDED]** | A later measurement overturned this. Both are shown, with the newer one authoritative. |
 | **[DERIVED]** | Arithmetic on our own measured values. Arithmetic shown. |
 | **[UNVERIFIED]** | We could not confirm it. Do not rely on it. |
 | **[CONTRADICTS]** | Our measurement disagrees with `nisi-master-reference.md`. |
@@ -35,6 +37,91 @@ circuits and fixtures must exist before `make test`.
 
 ---
 
+## 0. Corrections from the V2 measurement work, 18 August 2026
+
+Four findings from `V2_EVIDENCE.md` change how figures in this file must be read. They are
+here rather than only in that file so this document is not quietly wrong in isolation.
+
+### 0.1 [SUPERSEDED] §1c's "local understates by 32–41%" does not generalise
+
+§1c is correct for the workload it measured — `deposit`, `bet` and `betEncrypted`, all of
+which cross five contracts and carry proof calldata. It does **not** describe storage-bound
+code, where local forge runs the other way:
+
+| Workload | Dominant cost | Local vs live |
+|---|---|---|
+| Cross-contract, calldata-heavy actions | call overhead, calldata | local **understates** 32–41% |
+| Contiguous storage | cold SLOAD | local **overstates** ~2× |
+
+"Local is a lower bound" is true for actions and **false** for storage sweeps. Never apply a
+fixed multiplier without first asking which kind of code is being measured.
+
+### 0.2 [CONTRADICTS §3] Contiguous slots are nearly free on the live chain
+
+§3's `[UNVERIFIED]` note on local cold *account* access flagged that local numbers should
+not be trusted without checking. Checked, and the gap is larger than that note implies.
+
+`SlotProbe` (`contracts/src/probe/SlotProbe.sol`), live marginal cost per slot:
+
+| | reads | writes |
+|---|---|---|
+| Contiguous (consecutive slots) | **261** | **252** |
+| Scattered (keccak-derived mapping keys) | **8,357** | **11,174** |
+
+Scattered reproduces the documented 8,100 cold SLOAD plus ~257 loop overhead; contiguous
+reproduces the loop overhead and nothing else. Four sizes, two independent RPCs, exact
+agreement.
+
+`ElGamalAccumulator`'s comment states that MIP-8 page-sharing "does not" explain the extended
+cost and that "Monad charges the full per-slot surcharge", citing `StorageContiguity.t.sol`.
+That test is local. On the chain, adjacency is discounted ~32×.
+
+**This did NOT change the affine-versus-extended decision.** Re-measured directly, live, same
+market, same ciphertext, cold slots:
+
+| | Live |
+|---|---|
+| `accumulateExtended` — 8 slots, no inversion | 149,151 |
+| `accumulateAffine` — 4 slots, one `modexp` | **123,722** |
+
+Affine still wins by 25,429. **`accumulateAffine` remains the production path.** A derivation
+from `SlotProbe` predicted the opposite and was wrong: the flat-array result does not transfer
+to a struct at a keccak-derived base inside a nested mapping, and the shape under which the
+discount applies is **not established**. Do not settle a layout question from `SlotProbe`;
+measure the real contract.
+
+### 0.3 [MEASURED] A receipt reports the DECLARED gas limit, not gas used
+
+The same call broadcast at three declared limits:
+
+| Declared | Receipt `gasUsed` | Status |
+|---|---|---|
+| 12,000,000 | 12,000,000 | success |
+| 3,000,000 | 3,000,000 | success |
+| 200,000 | 200,000 | success |
+
+This follows from Monad charging the declared limit — the property `ActionGasPolicy` is built
+around — but its measurement consequence was undocumented. **The live figures in §1c and §1e
+are unaffected**, because `forge script` derives its limit from `eth_estimateGas`. The trap is
+a manual `cast send --gas-limit`, whose receipt means nothing.
+
+Measure with `eth_estimateGas`, and prefer marginal cost across two sizes.
+
+### 0.4 [SUPERSEDED] `deposit` no longer has 3 public signals
+
+The build-hash guard (`make bind`) reports `DepositVerifier` at **`nPublic = 2`**. This file
+records 3 signals at 998,574 gas in §1, §1c and §5.
+
+The per-signal figure confirms which is stale: `bet` at 4 signals costs 1,029,454, and
+30,756 × 1 subtracted gives 998,698 — within 124 gas of the recorded 998,574. **That
+measurement was taken against a 3-signal deposit circuit which no longer exists.** At 2
+signals the verifier should cost roughly 967,900.
+
+**Every `deposit` verify figure in this document is stale until `make gate` is re-run.**
+Rows are left in place rather than deleted so the discrepancy stays visible.
+
+---
+
 ## 1. The Phase 0 gate — PASSED
 
 The build plan's stop-line: if a production-shaped BabyJubJub-ElGamal Groth16
@@ -44,7 +131,7 @@ verify exceeds **~1.5M gas**, stop and reassess the architecture.
 |---|---|---|---|---|---|
 | `probe_fixed_key` (key compiled in) | 4 | **1,029,454** | 1,039,706 | 68.6% | **PASS** |
 | `probe_pubkey_input` (key as input) | 6 | **1,090,965** | **1,101,216** | 72.7% | **PASS** |
-| `deposit` | 3 | **998,574** | 1,008,826 | 66.6% | **PASS** |
+| `deposit` | 3 | **998,574** | 1,008,826 | 66.6% | **PASS** — [SUPERSEDED, see §0.4: the artifact now has 2 signals] |
 | `bet` | 4 | **1,029,454** | 1,039,706 | 68.6% | **PASS** |
 | `redeem` | 4 | **1,029,454** | 1,039,706 | 68.6% | **PASS** |
 
@@ -416,7 +503,7 @@ if state rent appears on Monad.
 
 | Verifier | Public signals | Verify gas |
 |---|---|---|
-| `deposit` | 3 | 998,574 |
+| `deposit` | 3 → **2** [SUPERSEDED §0.4] | 998,574 |
 | `bet` / `redeem` | 4 | 1,029,454 |
 | `probe_pubkey_input` | 6 | 1,090,965 |
 

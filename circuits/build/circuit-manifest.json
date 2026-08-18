@@ -1,0 +1,50 @@
+{
+  "probe_fixed_key": {
+    "contract": "FixedKeyVerifier",
+    "nPublic": 4,
+    "vkeySha256": "54a796a2544ba65c2a11981b6a390edf2db7b8866c4c25a40e429fd77623c7bc",
+    "verifierSourceSha256": "bc3f2523b4f7c55b14f640ed48608a63837c48618cb48ba050114158a4b777ee"
+  },
+  "probe_pubkey_input": {
+    "contract": "PubKeyInputVerifier",
+    "nPublic": 6,
+    "vkeySha256": "20ce891f4fb7e13230fd99103ff522d236c63833dea4cb806decda9b915aa73d",
+    "verifierSourceSha256": "7a5315a6ca181f11e2e3f7cec7eb275ca702aa07a0560adfd1ffb91afc05731f"
+  },
+  "deposit": {
+    "contract": "DepositVerifier",
+    "nPublic": 2,
+    "vkeySha256": "acddde77a1b0b42ae95e9843d35a62b0fd071a66cd1b51a0b9fac7fd45f3a47c",
+    "verifierSourceSha256": "e52ac4cd6d35851e54f9e19774cb78b130704204b7a29aaeaccd4af707c8bb26"
+  },
+  "bet": {
+    "contract": "BetVerifier",
+    "nPublic": 4,
+    "vkeySha256": "45fecd99ab84878e38709c0efb7189ec417e200ebe1e94eaa57132ce90ff04d9",
+    "verifierSourceSha256": "bd381104419698a9b879d5c04816b22b1bc13a1f241813c6b646d0574469b553"
+  },
+  "redeem": {
+    "contract": "RedeemVerifier",
+    "nPublic": 4,
+    "vkeySha256": "92c3b82d65a3e892727795fd9a7bf07f2fb17e4ea9bc0e9b3c3d551a7c3c0ad4",
+    "verifierSourceSha256": "03a44cb59c91db2e31c47993d487cbcae785649c3e7c91ea6fb23712ab96f5e4"
+  },
+  "bet_encrypted": {
+    "contract": "BetEncryptedVerifier",
+    "nPublic": 8,
+    "vkeySha256": "570cb7bf3368c777c0f8924dbf57d4013e01928563b5002757e6f158fbc8f895",
+    "verifierSourceSha256": "98c6d24cbf0b79bf1689d61347855c2ca9a3c7e7a2d24cc06e88859911dbc303"
+  },
+  "redeem_private": {
+    "contract": "RedeemPrivateVerifier",
+    "nPublic": 4,
+    "vkeySha256": "f8570229fd586507facfcb8f526c00c5be125be5d21e925c4b89391a0aa34ae8",
+    "verifierSourceSha256": "fff57b2a86193693d6766cd974ef3c1e9c46ebf65966470f678c54775883aa7b"
+  },
+  "withdraw": {
+    "contract": "WithdrawVerifier",
+    "nPublic": 4,
+    "vkeySha256": "34a2335931874427da5c3cb5a05b1393f970fc8518bfc0426cd61573dd6dc891",
+    "verifierSourceSha256": "c598aa6356eccf0b6eefa21f7f6ba112e086b1d6b85c4e73822ca711e5259c9e"
+  }
+}

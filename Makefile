@@ -93,7 +93,23 @@ verifiers: ## Copy generated verifiers into contracts/src/verifiers and build
 			"circuits/build/$${src}_verifier.sol" > "contracts/src/verifiers/$${name}.sol"; \
 		echo "wrote contracts/src/verifiers/$${name}.sol"; \
 	done
+	@$(MAKE) --no-print-directory bind
 	cd contracts && $(FORGE) build
+
+# THE BUILD-HASH GUARD. Circuit/verifier drift has orphaned three pools; nothing in the
+# repo could catch it, because the prover's key and the chain's verifier live in different
+# trees and no check compared them. This does, constant by constant.
+#
+# Runs as part of `verifiers` so the manifest can never describe a build it was not derived
+# from, and again in `verify-all` so CI fails on a stale COMMITTED verifier -- the case
+# where someone rebuilt circuits locally and pushed only half of it.
+.PHONY: bind
+bind: ## BUILD-HASH GUARD: every committed verifier matches its circuit artifact
+	node circuits/scripts/gen_manifest.mjs
+
+.PHONY: bind-check
+bind-check: ## Same guard, writes nothing (CI / pre-deploy)
+	node circuits/scripts/gen_manifest.mjs --check
 
 # ---------------------------------------------------------------------------
 # Measurement -- against live Monad nodes, no key and no spend
@@ -119,7 +135,7 @@ uniformity: ## CI ANTI-FINGERPRINTING GUARD: every action fits ONE declared gas 
 	python3 tools/check_gas_uniformity.py circuits/build/gate-$(NETWORK).json
 
 .PHONY: verify-all
-verify-all: prove fixtures test gate uniformity ## Everything that can fail, in dependency order
+verify-all: bind-check prove fixtures test gate uniformity ## Everything that can fail, in dependency order
 
 # ---------------------------------------------------------------------------
 
