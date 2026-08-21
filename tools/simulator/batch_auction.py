@@ -35,9 +35,15 @@ def curve(orders: list[dict[str, Any]], price: int) -> tuple[int, int]:
     return demand, supply
 
 
-def choose_price(orders: list[dict[str, Any]], previous_price: int | None = None) -> tuple[int, int, int]:
+def choose_price(
+    orders: list[dict[str, Any]],
+    previous_price: int | None = None,
+    grid_levels: int | None = None,
+) -> tuple[int, int, int]:
+    if grid_levels is None or grid_levels <= 0:
+        raise ValueError("grid_levels must be a positive integer")
     candidates = []
-    for price in sorted({o["limit"] for o in orders}):
+    for price in range(grid_levels):
         demand, supply = curve(orders, price)
         candidates.append((-min(demand, supply), abs(demand - supply), price, demand, supply))
     if not candidates:
@@ -92,15 +98,31 @@ def simulate(payload: dict[str, Any]) -> dict[str, Any]:
     previous_price = int(previous) if previous is not None else None
     if previous is not None and str(previous_price) != str(previous):
         raise ValueError("previous_clearing_price must be an integer")
-    price, demand, supply = choose_price(orders, previous_price)
+    grid_levels = payload.get("grid_levels")
+    try:
+        grid_levels = int(grid_levels)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("grid_levels must be a positive integer") from exc
+    if str(grid_levels) != str(payload.get("grid_levels")) or grid_levels <= 0:
+        raise ValueError("grid_levels must be a positive integer")
+    if any(order["limit"] >= grid_levels for order in orders):
+        raise ValueError("order limits must be within the configured grid")
+    price, demand, supply = choose_price(orders, previous_price, grid_levels)
     volume = min(demand, supply)
     buys = [o for o in orders if o["side"] == "buy" and o["limit"] >= price]
     sells = [o for o in orders if o["side"] == "sell" and o["limit"] <= price]
-    fills = allocate(buys, price, volume, "buy")
-    fills.update(allocate(sells, price, volume, "sell"))
+    buy_fills = allocate(buys, price, volume, "buy")
+    sell_fills = allocate(sells, price, volume, "sell")
+    executed = min(sum(buy_fills.values()), sum(sell_fills.values()))
+    while sum(buy_fills.values()) != executed or sum(sell_fills.values()) != executed:
+        buy_fills = allocate(buys, price, executed, "buy")
+        sell_fills = allocate(sells, price, executed, "sell")
+        executed = min(sum(buy_fills.values()), sum(sell_fills.values()))
+    assert sum(buy_fills.values()) == sum(sell_fills.values()) == executed
+    fills = {**buy_fills, **sell_fills}
     return {
         "clearing_price": price,
-        "executable_volume": volume,
+        "executable_volume": executed,
         "demand_at_price": demand,
         "supply_at_price": supply,
         "imbalance": abs(demand - supply),

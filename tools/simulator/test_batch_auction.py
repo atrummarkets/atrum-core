@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import json
 import unittest
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from batch_auction import allocate, choose_price, simulate
 
 class BatchAuctionTests(unittest.TestCase):
     def test_reference_book_and_strict_priority(self):
-        result = simulate({"orders": [
+        result = simulate({"grid_levels": 200, "orders": [
             {"id": "b1", "side": "buy", "limit": 105, "size": 4},
             {"id": "b2", "side": "buy", "limit": 100, "size": 6},
             {"id": "b3", "side": "buy", "limit": 95, "size": 5},
@@ -36,8 +37,25 @@ class BatchAuctionTests(unittest.TestCase):
             {"id": "b2", "side": "buy", "limit": 110, "size": 1},
             {"id": "s2", "side": "sell", "limit": 110, "size": 1},
         ]
-        self.assertEqual(choose_price(orders)[0], 100)
-        self.assertEqual(choose_price(orders, 110)[0], 110)
+        self.assertEqual(choose_price(orders, grid_levels=200)[0], 101)
+        self.assertEqual(choose_price(orders, 110, 200)[0], 109)
+
+    def test_tie_break_uses_unsubmitted_grid_levels(self):
+        orders = [
+            {"id": "b", "side": "buy", "limit": 105, "size": 1},
+            {"id": "s", "side": "sell", "limit": 100, "size": 1},
+        ]
+        self.assertEqual(choose_price(orders, 103, 200)[0], 103)
+
+    def test_reconcile_rounding_and_publish_filled_volume(self):
+        result = simulate({"grid_levels": 200, "orders": [
+            {"id": "b1", "side": "buy", "limit": 100, "size": 3},
+            {"id": "b2", "side": "buy", "limit": 100, "size": 3},
+            {"id": "s1", "side": "sell", "limit": 100, "size": 5},
+        ]})
+        self.assertEqual(result["executable_volume"], 4)
+        self.assertEqual(sum(x["filled"] for x in result["fills"] if x["side"] == "buy"), 4)
+        self.assertEqual(sum(x["filled"] for x in result["fills"] if x["side"] == "sell"), 4)
 
     def test_input_order_and_equal_price_do_not_create_time_priority(self):
         orders = [
@@ -46,12 +64,19 @@ class BatchAuctionTests(unittest.TestCase):
         ]
         fills = allocate(orders, 100, 3, "buy")
         self.assertEqual(fills, {"early": 1, "late": 1})
-        payload = {"orders": orders + [{"id": "s", "side": "sell", "limit": 100, "size": 3}]}
-        self.assertEqual(simulate(payload), simulate({"orders": list(reversed(payload["orders"]))}))
+        payload = {"grid_levels": 200, "orders": orders + [{"id": "s", "side": "sell", "limit": 100, "size": 3}]}
+        self.assertEqual(json.dumps(simulate(payload)), json.dumps(simulate({"grid_levels": 200, "orders": list(reversed(payload["orders"]))})))
 
     def test_non_integer_quantities_fail_closed(self):
         with self.assertRaises(ValueError):
-            simulate({"orders": [{"id": "b", "side": "buy", "limit": "1.5", "size": 1}]})
+            simulate({"grid_levels": 200, "orders": [{"id": "b", "side": "buy", "limit": "1.5", "size": 1}]})
+
+    def test_duplicate_ids_fail_closed(self):
+        with self.assertRaises(ValueError):
+            simulate({"grid_levels": 200, "orders": [
+                {"id": "same", "side": "buy", "limit": 100, "size": 1},
+                {"id": "same", "side": "sell", "limit": 100, "size": 1},
+            ]})
 
 
 if __name__ == "__main__":
