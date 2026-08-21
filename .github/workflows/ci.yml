@@ -180,3 +180,30 @@ jobs:
             sleep 20
           done
           exit 1
+
+  simulator:
+    name: Batch auction simulator
+    runs-on: ubuntu-latest
+    # The simulator's claims are determinism claims -- input-order independence,
+    # fail-closed on duplicate IDs, round-down allocation that conserves volume. Those
+    # are exactly the properties that hold when someone runs the tests by hand and
+    # quietly stop holding on the commit after. It is off-chain reference code with no
+    # dependencies, so guarding it costs one job and there is nothing to install.
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned, and the pin is load-bearing: `unittest discover` exits 5 when it finds
+      # no tests (3.12 behaviour, verified for both an empty directory and a file with
+      # zero test methods). That is what stops a rename or a bad -p pattern turning this
+      # job green while testing nothing, so there is no extra count assertion here.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tests
+        run: |
+          if [ ! -d tools/simulator ]; then
+            echo "tools/simulator does not exist on this ref -- nothing to guard yet"
+            exit 0
+          fi
+          python3 -m unittest discover -s tools/simulator -p 'test_*.py' -v
